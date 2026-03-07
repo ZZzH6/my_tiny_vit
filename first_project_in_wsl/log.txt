@@ -1,0 +1,9 @@
+nohup: 忽略输入
+当前使用的计算设备: cuda
+正在加载 CIFAR-100 数据集...
+Files already downloaded and verified
+Files already downloaded and verified
+正在构建自定义的 CustomMobileViT 模型 (内含 Coordinate Attention)...
+开始训练...
+Epoch [1/50] | Train Loss: 4.2231 | Val Accuracy: 35.12%
+   => 验证集准确率创下新高[35.12%]！模型已保存至 ./best_model.pth (此为后续 INT8 量化实验的基础)
