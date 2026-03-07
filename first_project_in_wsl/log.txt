@@ -7,3 +7,12 @@ Files already downloaded and verified
 开始训练...
 Epoch [1/50] | Train Loss: 4.2231 | Val Accuracy: 35.12%
    => 验证集准确率创下新高[35.12%]！模型已保存至 ./best_model.pth (此为后续 INT8 量化实验的基础)
+Epoch [2/50] | Train Loss: 2.8800 | Val Accuracy: 59.63%
+   => 验证集准确率创下新高[59.63%]！模型已保存至 ./best_model.pth (此为后续 INT8 量化实验的基础)
+Epoch [3/50] | Train Loss: 2.2025 | Val Accuracy: 62.95%
+   => 验证集准确率创下新高[62.95%]！模型已保存至 ./best_model.pth (此为后续 INT8 量化实验的基础)
+Epoch [4/50] | Train Loss: 2.0105 | Val Accuracy: 66.07%
+   => 验证集准确率创下新高[66.07%]！模型已保存至 ./best_model.pth (此为后续 INT8 量化实验的基础)
+Epoch [5/50] | Train Loss: 1.9188 | Val Accuracy: 69.42%
+   => 验证集准确率创下新高[69.42%]！模型已保存至 ./best_model.pth (此为后续 INT8 量化实验的基础)
+Epoch [6/50] | Train Loss: 1.8384 | Val Accuracy: 59.48%
