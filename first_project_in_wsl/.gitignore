@@ -1,0 +1,12 @@
+# 忽略整个 data 文件夹及其内部的所有数据集文件和压缩包
+data/
+
+# 忽略 Python 自动生成的缓存文件夹
+__pycache__/
+
+# 忽略 PyTorch 训练保存的模型权重文件
+*.pth
+*.pt
+
+# 忽略训练过程输出的结果图表
+training_results.png
