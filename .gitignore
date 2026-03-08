@@ -11,3 +11,4 @@ __pycache__/
 # 忽略训练过程输出的结果图表
 training_results.png
 log.txt
+pytorch_model.bin

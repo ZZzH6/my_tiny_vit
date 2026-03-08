@@ -12,7 +12,7 @@ class Config:
     WEIGHT_DECAY = 0.05
     NUM_CLASSES = 100
     LABEL_SMOOTHING = 0.1
-    SAVE_PATH = './best_model.pth'
+    SAVE_PATH = './models_saved/best_model.pth'
     
     # 默认数据路径
     DATA_DIR = './data'

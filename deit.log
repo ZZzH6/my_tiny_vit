@@ -1,0 +1,17 @@
+nohup: 忽略输入
+[*] 准备在 cuda 上训练横向对比模型: deit_tiny_patch16_224
+正在加载 CIFAR-100 数据集...
+Files already downloaded and verified
+Files already downloaded and verified
+[*] 开始以统一参数训练 deit_tiny_patch16_224 共 50 个 Epochs...
+Epoch [1/50] | Train Loss: 4.4738 | Val Accuracy: 7.50%
+Epoch [2/50] | Train Loss: 4.2897 | Val Accuracy: 11.73%
+Epoch [3/50] | Train Loss: 4.1341 | Val Accuracy: 13.47%
+Epoch [4/50] | Train Loss: 4.0130 | Val Accuracy: 17.67%
+Epoch [5/50] | Train Loss: 3.8926 | Val Accuracy: 17.71%
+Epoch [6/50] | Train Loss: 3.7916 | Val Accuracy: 21.91%
+Epoch [7/50] | Train Loss: 3.7027 | Val Accuracy: 23.90%
+Epoch [8/50] | Train Loss: 3.6190 | Val Accuracy: 26.76%
+Epoch [9/50] | Train Loss: 3.5346 | Val Accuracy: 28.41%
+Epoch [10/50] | Train Loss: 3.4282 | Val Accuracy: 29.81%
+Epoch [11/50] | Train Loss: 3.3427 | Val Accuracy: 32.15%
