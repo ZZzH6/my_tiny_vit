@@ -4,19 +4,21 @@ from torch.utils.data import DataLoader
 
 def get_dataloaders(batch_size=64, num_workers=4, data_dir='./data'):
     """构建训练和验证数据加载器。"""
+    # 移除了极其耗时的 Resize(224, 224)，回归 CIFAR 原生 32x32 大小
+    # 使用标准 CIFAR 数据增强：RandomCrop(32, padding=4)
     train_transform = transforms.Compose([
-        transforms.Resize((224, 224)),       
+        transforms.RandomCrop(32, padding=4),       
         transforms.RandomHorizontalFlip(),   
         transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10), 
         transforms.ToTensor(),               
         transforms.Normalize(                
             mean=[0.485, 0.456, 0.406], 
             std=[0.229, 0.224, 0.225]
-        )
+        ),
+        transforms.RandomErasing(p=0.25),  # 随机擦除增强，进一步防过拟合
     ])
 
     val_transform = transforms.Compose([
-        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.485, 0.456, 0.406], 

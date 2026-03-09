@@ -12,3 +12,6 @@ __pycache__/
 training_results.png
 log.txt
 pytorch_model.bin
+deit.log
+train.log
+mobilevit.log
