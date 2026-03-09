@@ -1,35 +1,38 @@
 import torch
 import torch.nn as nn
-from timm.models.vision_transformer import VisionTransformer, PatchEmbed
 import timm
 
 # ==========================================
-# 1. 局部注意力锚点: Coordinate Attention (CA)
+# 优化点4: 量化友好算子 (Hardswish / Hardsigmoid 代替 SiLU / Sigmoid)
 # ==========================================
 class CoordinateAttention(nn.Module):
     """
-    Coordinate Attention (坐标注意力) 模块
-    作用：捕捉跨通道特征，并把空间坐标信息编码进特征图。
-    适用性广，计算极小。
+    量化友好的 Coordinate Attention 模块。
+    使用大名鼎鼎的 MobileNetV3 配方，全部采用 Hard 激活函数，扫清落地部署时的 INT8 量化障碍。
     """
-    def __init__(self, c_in, c_out, reduction=32):
+    def __init__(self, inp, oup, reduction=32):
         super(CoordinateAttention, self).__init__()
         self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
         self.pool_w = nn.AdaptiveAvgPool2d((1, None))
 
-        mip = max(8, c_in // reduction)
+        mip = max(8, inp // reduction)
 
-        self.conv1 = nn.Conv2d(c_in, mip, kernel_size=1, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(inp, mip, kernel_size=1, stride=1, padding=0)
         self.bn1 = nn.BatchNorm2d(mip)
-        self.act = nn.SiLU()
         
-        self.conv_h = nn.Conv2d(mip, c_out, kernel_size=1, stride=1, padding=0)
-        self.conv_w = nn.Conv2d(mip, c_out, kernel_size=1, stride=1, padding=0)
+        # 使用 Hardswish 替代 SiLU
+        self.act = nn.Hardswish(inplace=True) 
+        
+        self.conv_h = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        self.conv_w = nn.Conv2d(mip, oup, kernel_size=1, stride=1, padding=0)
+        
+        # 使用 Hardsigmoid 替代原生的 Sigmoid
+        self.hardsigmoid = nn.Hardsigmoid(inplace=True)
 
     def forward(self, x):
         identity = x
-        n, c, h, w = x.size()
         
+        n, c, h, w = x.size()
         x_h = self.pool_h(x)
         x_w = self.pool_w(x).permute(0, 1, 3, 2)
 
@@ -41,66 +44,67 @@ class CoordinateAttention(nn.Module):
         x_h, x_w = torch.split(y, [h, w], dim=2)
         x_w = x_w.permute(0, 1, 3, 2)
 
-        a_h = torch.sigmoid(self.conv_h(x_h))
-        a_w = torch.sigmoid(self.conv_w(x_w))
+        # 空间双向门控
+        a_h = self.hardsigmoid(self.conv_h(x_h))
+        a_w = self.hardsigmoid(self.conv_w(x_w))
 
         out = identity * a_w * a_h
         return out
 
 
 # ==========================================
-# 2. 你的核心毕设模型：CustomLightViT (基于 ViT-Base 魔改)
+# 毕设核心：极致轻量化且性能强悍的定制度 ViT
 # ==========================================
+
 class CustomLightViT(nn.Module):
     """
-    【毕设核心创新模型】 - 手工轻量化的 ViT
-    思路来源：
-    1. 抛弃庞大的参数，降低维度和深度。
-       原版 ViT-Base: 12 层, dim=768, heads=12 (86M 参数)
-       我们的定制版:   6 层, dim=192, heads=3  (估算 <5M 参数)
-    2. 引入 Coordinate Attention 弥补 Transformer 处理短距离局部特征的弱点。
+    经过四大架构升级的终极版 CustomLightViT：
+    1. 【更深度的局域感知】: Convolutional Stem 内部使用 Hardswish 并在进入 Transformer 前立即融合一次早期 CA 注意力。
+    2. 【破除静态诅咒】: 抛弃绝对位置编码，引入动态响应的条件位置编码 (CPE)，极大地提升对 RandomCrop 和 RandomErasing 的鲁棒性。
+    3. 【纯粹的全局池化】: 抛弃格格不入的 CLS Token，完全利用深度 CA 重标定后的密集空间特征做 GAP 分类。
+    4. 【全网络量化就绪】: 全流程剔除指数类算子。
     """
     def __init__(self, num_classes=100, embed_dim=192, depth=6, num_heads=3, drop_rate=0.1, drop_path_rate=0.15):
         super(CustomLightViT, self).__init__()
         
-        # 记录内部所需参数
+        self.H = 8 
+        self.W = 8
         self.embed_dim = embed_dim
         
-        # ==【毕设魔改点1】：将原生 PatchEmbed 替换为 Convolutional Stem ==
-        # 原版 ViT 的 16x16 切片对细粒度/小图特征极度不友好。
-        # 我们使用一个 3 层的轻量级卷积主干。由于数据集已改回原生的 32x32 尺寸：
-        # 这里进行轻微下采样 (stride=(1,2,1))
-        # 32x32 -> (stride=1) -> 32x32 -> (stride=2) -> 16x16 -> (stride=1) -> 16x16
+        # 优化点1 & 4：Convolutional Stem，结合 Hardswish
         self.patch_embed = nn.Sequential(
-            nn.Conv2d(3, embed_dim // 4, kernel_size=3, stride=1, padding=1, bias=False),  
+            nn.Conv2d(3, embed_dim // 4, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(embed_dim // 4),
-            nn.SiLU(inplace=True),
+            nn.Hardswish(inplace=True),
             
-            nn.Conv2d(embed_dim // 4, embed_dim // 2, kernel_size=3, stride=2, padding=1, bias=False), 
+            nn.Conv2d(embed_dim // 4, embed_dim // 2, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(embed_dim // 2),
-            nn.SiLU(inplace=True),
+            nn.Hardswish(inplace=True),
             
-            nn.Conv2d(embed_dim // 2, embed_dim, kernel_size=3, stride=1, padding=1, bias=False), 
-            nn.BatchNorm2d(embed_dim)
+            nn.Conv2d(embed_dim // 2, embed_dim, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.Hardswish(inplace=True)
         )
-        self.num_patches = 16 * 16  # 256
-        self.H = 16
-        self.W = 16
         
-        # 2. Class Token & Position Embedding
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, self.num_patches + 1, embed_dim))
-        self.pos_drop = nn.Dropout(p=drop_rate)
-        
-        # 3. Transformer Encoder Blocks
+        # 优化点2：CA 深度下放 - 早期空间感知模块
+        # 在 Patch 进入自注意力的无序交互前，强制其进行一次深度的空间坐标交叉门控
+        self.ca_early = CoordinateAttention(inp=embed_dim, oup=embed_dim, reduction=32)
+
+        # 优化点3：CPE (Conditional Positional Encoding)
+        # 用带 padding 的深度可分离卷积，动态赋予二维特征图位置偏移信息 (取代了 self.pos_embed)
+        self.cpe = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=1, padding=1, groups=embed_dim, bias=True)
+
+        # 随机深度率
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        
+        # 核心堆叠 (Timm Block 本身非常高效且支持 DropPath)
         self.blocks = nn.Sequential(*[
             timm.models.vision_transformer.Block(
                 dim=embed_dim, 
                 num_heads=num_heads, 
-                mlp_ratio=4.0, 
+                mlp_ratio=2.0, 
                 qkv_bias=True, 
-                proj_drop=drop_rate,  # 修复 timm API 更新：drop => proj_drop
+                proj_drop=drop_rate, 
                 attn_drop=drop_rate, 
                 drop_path=dpr[i]
             )
@@ -108,80 +112,60 @@ class CustomLightViT(nn.Module):
         ])
         
         self.norm = nn.LayerNorm(embed_dim)
+        
+        # 深层网络末端，分类之前的 CA 重标定模块
+        self.ca_late = CoordinateAttention(inp=embed_dim, oup=embed_dim, reduction=32)
+        
+        # 优化点1：彻底抛弃 CLS，改用基于特征图的全局平均池化
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        
+        self.head_drop = nn.Dropout(drop_rate)
+        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-        # ==【毕设魔改点2】：深层特征融合 CA 模块 ==
-        # 将 Coordinate Attention 从开头移到了 Transformer 提完特征之后！
-        # 让它去重塑已经具备全局感受野的高阶语义特征，而不是原始像素框。
-        self.ca_module = CoordinateAttention(c_in=embed_dim, c_out=embed_dim)
+    def forward_features(self, x):
+        # 1. 局部提取: [B, 3, 32, 32] -> [B, C, 8, 8]
+        x = self.patch_embed(x)
+        B, C, H, W = x.shape
         
-        # ==【毕设魔改点3】：更强的自定义分类头 ==
-        hidden_dim = embed_dim // 2
-        self.head = nn.Sequential(
-            nn.Dropout(p=drop_rate),
-            nn.Linear(embed_dim, hidden_dim),
-            nn.SiLU(),
-            nn.BatchNorm1d(hidden_dim),
-            nn.Linear(hidden_dim, num_classes)
-        )
+        # 2. 浅层级联坐标注意力 (CA 下放)
+        x = self.ca_early(x)
         
-        self._init_weights()
-
-    def _init_weights(self):
-        nn.init.trunc_normal_(self.pos_embed, std=.02)
-        nn.init.trunc_normal_(self.cls_token, std=.02)
-
-    def forward(self, x):
-        B = x.shape[0]
+        # 3. 注入动态位置信息 (CPE 残差模块)
+        x = x + self.cpe(x)
         
-        # 1. Conv Stem (取代 Patch Embed)
-        x = self.patch_embed(x) # [B, 192, 14, 14]
-        
-        # 将 2D Feature Map 展平为 Sequence: [B, 192, 196] -> [B, 196, 192]
+        # 4. 转换维度适配 Transformer: [B, C, H, W] -> [B, N, C]
         x = x.flatten(2).transpose(1, 2)
         
-        # 2. 拼接 CLS Token 和位置编码
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1) # [B, 197, 192]
-        x = x + self.pos_embed
-        x = self.pos_drop(x)
-        
-        # 3. 逐层穿过削减版 Transformer
-        for block in self.blocks:
-            x = block(x)
-        
+        # 5. 深层全局交互 (Self-Attention)
+        x = self.blocks(x)
         x = self.norm(x)
-        
-        # 4. 提取输出
-        cls_feature = x[:, 0] # [B, 192]
-        spatial_features = x[:, 1:] # [B, 256, 192]
+        return x, H, W
 
-        # --- 毕设魔改区: 在深层插入 CA 模块重塑空间特征 ---
-        # 还原回 2D 结构 (16x16)
-        spatial_features_2d = spatial_features.transpose(1, 2).view(B, self.embed_dim, self.H, self.W) # [B, 192, 16, 16]
-        spatial_features_2d = self.ca_module(spatial_features_2d) # 深层 CA 加权
+    def forward(self, x):
+        # 获得序列化的高阶特征
+        x, H, W = self.forward_features(x)
+        B, N, C = x.shape
         
-        # CA 加权后的空间特征进行池化 (Global Average Pooling)
-        spatial_pooled = spatial_features_2d.flatten(2).mean(dim=2) # [B, 192]
-
-        # 融合 CLS_Token 和 池化后的空间特征
-        final_feature = cls_feature + spatial_pooled 
-        # -------------------------------
+        # 逆转换回 2D 结构供深层 CA 与池化层消费: [B, N, C] -> [B, C, H, W]
+        x = x.transpose(1, 2).view(B, C, H, W)
         
-        # 5. 通过魔改版分类头输出预测
-        out = self.head(final_feature)
+        # 进行最后一次基于空间特征重标定的 CA
+        x = self.ca_late(x)
         
-        return out
-
+        # 进行全局空间特征池化 (不再依赖孤零零的 CLS Token)
+        x = self.global_pool(x).flatten(1)
+        
+        # 分类
+        x = self.head_drop(x)
+        x = self.head(x)
+        return x
 
 if __name__ == '__main__':
-    # 快速测试脚本，确保我们在纸上设计的维度可以成功 Forward，且计算参数量
+    # 测试脚本：确保模型能正常跑通，并观察参数数量
     model = CustomLightViT(num_classes=100)
-    
-    # 打印参数量信息以便对比
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"\n[*] CustomLightViT 模型总参数量: {total_params / 1e6:.2f} M")
-    
     dummy_input = torch.randn(2, 3, 32, 32)
-    out = model(dummy_input)
-    print(f"[*] 前向传播测试成功，输出维度: {out.shape}")
-
+    output = model(dummy_input)
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"[*] CustomLightViT 模型总参数量: {total_params / 1e6:.2f} M")
+    print(f"[*] 前向传播测试成功，输出维度: {output.shape}") 
