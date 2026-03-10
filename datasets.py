@@ -12,8 +12,8 @@ def get_dataloaders(batch_size=64, num_workers=4, data_dir='./data'):
         transforms.AutoAugment(transforms.AutoAugmentPolicy.CIFAR10), 
         transforms.ToTensor(),               
         transforms.Normalize(                
-            mean=[0.485, 0.456, 0.406], 
-            std=[0.229, 0.224, 0.225]
+            mean=[0.5071, 0.4867, 0.4408], 
+            std=[0.2675, 0.2565, 0.2761]
         ),
         transforms.RandomErasing(p=0.25),  # 随机擦除增强，进一步防过拟合
     ])
@@ -21,8 +21,8 @@ def get_dataloaders(batch_size=64, num_workers=4, data_dir='./data'):
     val_transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize(
-            mean=[0.485, 0.456, 0.406], 
-            std=[0.229, 0.224, 0.225]
+            mean=[0.5071, 0.4867, 0.4408], 
+            std=[0.2675, 0.2565, 0.2761]
         )
     ])
 
@@ -30,7 +30,7 @@ def get_dataloaders(batch_size=64, num_workers=4, data_dir='./data'):
     train_dataset = torchvision.datasets.CIFAR100(root=data_dir, train=True, download=True, transform=train_transform)
     val_dataset = torchvision.datasets.CIFAR100(root=data_dir, train=False, download=True, transform=val_transform)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
 
     return train_loader, val_loader, train_dataset, val_dataset

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import timm
+from timm.layers import trunc_normal_
 
 # ==========================================
 # 优化点4: 量化友好算子 (Hardswish / Hardsigmoid 代替 SiLU / Sigmoid)
@@ -64,7 +65,7 @@ class CustomLightViT(nn.Module):
     3. 【纯粹的全局池化】: 抛弃格格不入的 CLS Token，完全利用深度 CA 重标定后的密集空间特征做 GAP 分类。
     4. 【全网络量化就绪】: 全流程剔除指数类算子。
     """
-    def __init__(self, num_classes=100, embed_dim=192, depth=6, num_heads=3, drop_rate=0.1, drop_path_rate=0.15):
+    def __init__(self, num_classes=100, embed_dim=192, depth=6, num_heads=3, drop_rate=0.1, drop_path_rate=0.2):
         super(CustomLightViT, self).__init__()
         
         self.H = 8 
@@ -121,6 +122,22 @@ class CustomLightViT(nn.Module):
         
         self.head_drop = nn.Dropout(drop_rate)
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+
+        # 权重初始化
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, nn.Conv2d):
+            nn.init.kaiming_normal_(m.weight, mode='fan_out')
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.LayerNorm, nn.BatchNorm2d)):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
 
     def forward_features(self, x):
         # 1. 局部提取: [B, 3, 32, 32] -> [B, C, 8, 8]
