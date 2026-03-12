@@ -11,7 +11,7 @@ from datetime import datetime
 # Local imports
 from config import Config
 from datasets import get_dataloaders, get_available_datasets
-from utils import setup_device, print_header
+from utils import setup_device, print_header, set_seed
 
 def evaluate(model, dataloader, device):
     model.eval()
@@ -36,6 +36,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    set_seed(Config.SEED)
     device = setup_device()
     
     dataset_name = args.dataset.upper()

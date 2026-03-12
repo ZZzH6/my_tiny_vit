@@ -7,7 +7,8 @@ class Config:
     """
     BATCH_SIZE = 256 
     NUM_WORKERS = 16  
-    EPOCHS = 500         
+    SEED = 42
+    EPOCHS = 400         
     LR = 1e-3         
     WEIGHT_DECAY = 0.05   
     LABEL_SMOOTHING = 0.1
@@ -16,11 +17,15 @@ class Config:
     DATA_DIR = './data'
     SAVE_DIR_BASE = './lightweight_saved'
 
+    # 学习率调度参数
+    WARMUP_EPOCHS = 30
+    HOLD_EPOCHS = 30
+
     # Mixup 配置参数
-    MIXUP_ALPHA = 0.5
+    MIXUP_ALPHA = 0.3
     # 由于原始分辨率仅 32x32, 强烈的 CutMix 破坏性极强，降低其介入概率或 Alpha
     CUTMIX_ALPHA = 0.0
-    PROB = 0.5       # 1.0 -> 0.5 (允许模型看一半干净样本，加快收敛)
+    PROB = 0.3       # 1.0 -> 0.3 (允许模型看更多干净样本，加快收敛)
     SWITCH_PROB = 0.0
 
 os.makedirs(Config.SAVE_DIR_BASE, exist_ok=True)

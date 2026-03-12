@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import timm
@@ -54,26 +55,67 @@ class CoordinateAttention(nn.Module):
 
 
 # ==========================================
+# 新增模块：带局部偏置的 ConvFFN (Local FFN)
+# ==========================================
+class ConvFFN(nn.Module):
+    """
+    带有 3x3 深度可分离卷积的 FFN，替换原版纯 Linear 的 MLP。
+    """
+    # 核心修改：在这里的最后加上 **kwargs
+    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.Hardswish, drop=0., **kwargs):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        
+        # 核心改进：引入 3x3 Depthwise 卷积进行局部空间交互
+        self.dwconv = nn.Conv2d(
+            hidden_features, hidden_features, 
+            kernel_size=3, stride=1, padding=1, groups=hidden_features
+        )
+        
+        # 默认搭配量化友好的 Hardswish
+        self.act = act_layer()
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.drop = nn.Dropout(drop)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        # 推导图像的宽和高 (对于正方形图像 H=W)
+        H = int(math.sqrt(N))
+        W = H 
+
+        # 1. Linear 升维
+        x = self.fc1(x)
+        
+        # 2. 从 Sequence (B, N, C) 转化为 Image (B, C, H, W) 进行卷积
+        x_2d = x.transpose(1, 2).view(B, -1, H, W)
+        x_2d = self.dwconv(x_2d)
+        
+        # 3. 再次展平回 Sequence (B, C, H, W) -> (B, N, C)
+        x = x_2d.flatten(2).transpose(1, 2)
+        
+        # 4. 激活与降维
+        x = self.act(x)
+        x = self.drop(x)
+        x = self.fc2(x)
+        x = self.drop(x)
+        return x
+
+
+# ==========================================
 # 毕设核心：极致轻量化且性能强悍的定制度 ViT
 # ==========================================
 
 class CustomLightViT(nn.Module):
-    """
-    终极版 CustomLightViT (冲击 90%+) - 引入层级化架构与多尺度特征
-    1. 【高分辨率浅层 Stage 1】: 16x16 解析度，使用前期 Transformer 捕获细粒度特征。
-    2. 【Patch Merging】: 空间降采样 (16x16 -> 8x8) 且通道翻倍，构建金字塔结构。
-    3. 【深层全局交互 Stage 2】: 8x8 解析度，高通道数，负责全局语义。
-    4. 【双重 CPE 注入】: 在每个 Stage 提供局部位置感知。
-    """
     def __init__(self, num_classes=100, embed_dim=256, depth=8, num_heads=4, drop_rate=0.1, drop_path_rate=0.2):
         super(CustomLightViT, self).__init__()
         
-        # 初始特征维度 (适配金字塔结构)
-        dim_stage1 = embed_dim // 2  # 例如 96
-        dim_stage2 = embed_dim       # 例如 192
+        dim_stage1 = embed_dim // 2  # 例如 128
+        dim_stage2 = embed_dim       # 例如 256
         
-        # 1. 更加轻量的 Conv Stem (输出保留较高分辨率: 原尺寸 64x64 -> 16x16)
-        # stride=2 产生 32x32, 再次 stride=2 产生 16x16
+        # 1. Conv Stem
         self.patch_embed = nn.Sequential(
             nn.Conv2d(3, dim_stage1 // 2, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm2d(dim_stage1 // 2),
@@ -86,27 +128,30 @@ class CustomLightViT(nn.Module):
         
         self.ca_early = CoordinateAttention(inp=dim_stage1, oup=dim_stage1, reduction=16)
 
-        # Stage 1 (高分辨率、较少通道)
+        # Stage 1 
         self.cpe_stage1 = nn.Conv2d(dim_stage1, dim_stage1, kernel_size=3, stride=1, padding=1, groups=dim_stage1, bias=True)
         
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         depth_s1 = depth // 2
         depth_s2 = depth - depth_s1
         
+        # 替换为 ConvFFN
         self.blocks_stage1 = nn.Sequential(*[
             timm.models.vision_transformer.Block(
                 dim=dim_stage1, 
                 num_heads=num_heads, 
-                mlp_ratio=4.0,  # 恢复到高容量 4.0
+                mlp_ratio=3.0,  
                 qkv_bias=True, 
                 proj_drop=drop_rate, 
-                attn_drop=0.0,  # 移除 attn_drop
-                drop_path=dpr[i]
+                attn_drop=0.0,  
+                drop_path=dpr[i],
+                mlp_layer=ConvFFN,           # <--- 注入自定义的 ConvFFN
+                act_layer=nn.Hardswish       # <--- 统一采用量化友好激活函数
             )
             for i in range(depth_s1)
         ])
         
-        # Patch Merging (空间减半 16x16->8x8，通道数翻倍 dim_s1->dim_s2)
+        # Patch Merging
         self.downsample = nn.Sequential(
             nn.BatchNorm2d(dim_stage1),
             nn.Conv2d(dim_stage1, dim_stage2, kernel_size=3, stride=2, padding=1, bias=False),
@@ -116,18 +161,21 @@ class CustomLightViT(nn.Module):
         
         self.ca_mid = CoordinateAttention(inp=dim_stage2, oup=dim_stage2, reduction=8)
 
-        # Stage 2 (低分辨率、高通道)
+        # Stage 2
         self.cpe_stage2 = nn.Conv2d(dim_stage2, dim_stage2, kernel_size=3, stride=1, padding=1, groups=dim_stage2, bias=True)
         
+        # 替换为 ConvFFN
         self.blocks_stage2 = nn.Sequential(*[
             timm.models.vision_transformer.Block(
                 dim=dim_stage2, 
                 num_heads=num_heads, 
-                mlp_ratio=4.0, # 恢复到 4.0 
+                mlp_ratio=3.0, 
                 qkv_bias=True, 
                 proj_drop=drop_rate, 
                 attn_drop=0.0, 
-                drop_path=dpr[depth_s1 + i]
+                drop_path=dpr[depth_s1 + i],
+                mlp_layer=ConvFFN,           # <--- 注入自定义的 ConvFFN
+                act_layer=nn.Hardswish       # <--- 统一采用量化友好激活函数
             )
             for i in range(depth_s2)
         ])
@@ -154,22 +202,18 @@ class CustomLightViT(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward_features(self, x):
-        # 1. Stem (输入 64x64 -> 16x16)
         x = self.patch_embed(x)
         x = self.ca_early(x)
         
-        # ———— Stage 1 (High Res: 16x16) ————
         x = x + self.cpe_stage1(x)
         B, C1, H1, W1 = x.shape
         x = x.flatten(2).transpose(1, 2)
         x = self.blocks_stage1(x)
         
-        # ———— Patch Merging (16x16 -> 8x8) ————
         x = x.transpose(1, 2).view(B, C1, H1, W1)
         x = self.downsample(x)
         x = self.ca_mid(x)
         
-        # ———— Stage 2 (Low Res: 8x8) ————
         x = x + self.cpe_stage2(x)
         B, C2, H2, W2 = x.shape
         x = x.flatten(2).transpose(1, 2)
@@ -179,30 +223,21 @@ class CustomLightViT(nn.Module):
         return x, H2, W2
 
     def forward(self, x):
-        # 获得序列化的高阶特征
         x, H, W = self.forward_features(x)
         B, N, C = x.shape
         
-        # 逆转换回 2D 结构供深层 CA 与池化层消费: [B, N, C] -> [B, C, H, W]
         x = x.transpose(1, 2).view(B, C, H, W)
-        
-        # 进行最后一次基于空间特征重标定的 CA
         x = self.ca_out(x)
-        
-        # 进行全局空间特征池化 (不再依赖孤零零的 CLS Token)
         x = self.global_pool(x).flatten(1)
-        
-        # 分类
         x = self.head_drop(x)
         x = self.head(x)
         return x
 
 if __name__ == '__main__':
-    # 测试脚本：确保模型能正常跑通，并观察参数数量
     model = CustomLightViT(num_classes=100)
     dummy_input = torch.randn(2, 3, 32, 32)
     output = model(dummy_input)
     
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"[*] CustomLightViT 模型总参数量: {total_params / 1e6:.2f} M")
-    print(f"[*] 前向传播测试成功，输出维度: {output.shape}") 
+    print(f"[*] CustomLightViT (Local FFN) 模型总参数量: {total_params / 1e6:.2f} M")
+    print(f"[*] 前向传播测试成功，输出维度: {output.shape}")

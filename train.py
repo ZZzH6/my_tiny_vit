@@ -19,7 +19,7 @@ from timm.loss import SoftTargetCrossEntropy
 from config import Config
 from datasets import get_dataloaders, get_available_datasets
 from engine import train_one_epoch, evaluate
-from utils import setup_device, print_header
+    from utils import setup_device, print_header, set_seed
 from custom_vit import CustomLightViT
 from models import CustomMobileViT
 # ---------------------------------
@@ -57,11 +57,8 @@ def split_weight_decay(model, weight_decay=0.05):
 
 def main():
     args = parse_args()
+    set_seed(Config.SEED)
     device = setup_device()
-    
-    # 启用 CUDNN Benchmark 优化纯卷积/线性层吞吐量 (固定大小输入时加速明显)
-    if torch.cuda.is_available():
-        torch.backends.cudnn.benchmark = True
         
     print_header("LIGHTWEIGHT VISION TRANSFORMER TRAINING")
     print(f"[*] Model     : {args.model}")
@@ -73,6 +70,8 @@ def main():
     print(f"[*] W-Decay   : {Config.WEIGHT_DECAY}")
     print(f"[*] Grad Clip : {Config.GRAD_CLIP_NORM}")
     print(f"[*] EMA Decay : {Config.EMA_DECAY}")
+    print(f"[*] Warmup    : {Config.WARMUP_EPOCHS}")
+    print(f"[*] Hold      : {Config.HOLD_EPOCHS}")
     print(f"[*] Mixup P   : {Config.PROB}")
     print("-" * 70)
 
@@ -150,14 +149,12 @@ def main():
     optimizer = torch.optim.AdamW(optim_parameters, lr=Config.LR)
     
     def lr_lambda(epoch):
-        warmup_epochs = 15
-        hold_epochs = 60
-        if epoch < warmup_epochs:
-            return float(epoch + 1) / float(max(1, warmup_epochs))
-        elif epoch < hold_epochs:
+        if epoch < Config.WARMUP_EPOCHS:
+            return float(epoch + 1) / float(max(1, Config.WARMUP_EPOCHS))
+        elif epoch < Config.HOLD_EPOCHS:
             return 1.0
         else:
-            progress = float(epoch - hold_epochs) / float(max(1, Config.EPOCHS - hold_epochs))
+            progress = float(epoch - Config.HOLD_EPOCHS) / float(max(1, Config.EPOCHS - Config.HOLD_EPOCHS))
             return 0.5 * (1.0 + math.cos(math.pi * progress))
             
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)

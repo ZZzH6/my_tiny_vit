@@ -1,10 +1,28 @@
 import torch
+import random
+import numpy as np
+import os
 
 def setup_device():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    if device.type == 'cuda':
-        torch.backends.cudnn.benchmark = True
     return device
+
+def set_seed(seed: int):
+    """
+    固定所有随机种子以确保实验可复现。
+    (B, C, H, W) -> 统一随机性
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    
+    # 牺牲部分性能以换取 100% 的可复现性
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+    print(f"[*] Random Seed: {seed} (Deterministic CUDNN: Enabled)")
 
 def compile_model_if_possible(model):
     if hasattr(torch, 'compile') and os.name != 'nt':
