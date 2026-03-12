@@ -10,13 +10,14 @@ import torch.nn as nn
 from torch.cuda.amp import GradScaler
 from timm.utils import ModelEmaV2
 import timm
+import torchvision.models as tv_models
 
 from timm.data.mixup import Mixup
 from timm.loss import SoftTargetCrossEntropy
 
 # --------- Local Modules ---------
 from config import Config
-from datasets import get_dataloaders
+from datasets import get_dataloaders, get_available_datasets
 from engine import train_one_epoch, evaluate
 from utils import setup_device, print_header
 from custom_vit import CustomLightViT
@@ -30,14 +31,41 @@ def parse_args():
     parser.add_argument('--model', type=str, required=True, 
                         choices=['custom_light_vit', 'mobilevit_xxs', 'deit_tiny_patch16_224'],
                         help="Choose which lightweight model to train")
+    parser.add_argument('--dataset', type=str, default='cifar100',
+                        choices=get_available_datasets(),
+                        help=f"Choose dataset to train on (default: cifar100)")
     return parser.parse_args()
+
+def split_weight_decay(model, weight_decay=0.05):
+    """
+    分离无需 weight decay 的参数（如 LayerNorm、BatchNorm2d、bias）
+    和需要 weight decay 的参数（如 Conv2d.weight、Linear.weight 等 2D+ 张量）
+    """
+    decay = []
+    no_decay = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if len(param.shape) == 1 or name.endswith(".bias"):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [
+        {'params': no_decay, 'weight_decay': 0.0},
+        {'params': decay, 'weight_decay': weight_decay}
+    ]
 
 def main():
     args = parse_args()
     device = setup_device()
+    
+    # 启用 CUDNN Benchmark 优化纯卷积/线性层吞吐量 (固定大小输入时加速明显)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
         
     print_header("LIGHTWEIGHT VISION TRANSFORMER TRAINING")
     print(f"[*] Model     : {args.model}")
+    print(f"[*] Dataset   : {args.dataset}")
     print(f"[*] Device    : {device}")
     print(f"[*] Batch     : {Config.BATCH_SIZE}")
     print(f"[*] Epochs    : {Config.EPOCHS}")
@@ -48,25 +76,58 @@ def main():
     print(f"[*] Mixup P   : {Config.PROB}")
     print("-" * 70)
 
-    train_loader, val_loader, _, _ = get_dataloaders(Config.BATCH_SIZE, Config.NUM_WORKERS, data_dir=Config.DATA_DIR)
+    # 通过 Dataset Registry 动态获取数据集信息
+    train_loader, val_loader, _, dataset_info = get_dataloaders(
+        Config.BATCH_SIZE, Config.NUM_WORKERS,
+        data_dir=Config.DATA_DIR, dataset=args.dataset
+    )
+    num_classes = dataset_info['num_classes']
+    print(f"[*] Classes   : {num_classes}")
 
     if args.model == 'custom_light_vit':
-        model = CustomLightViT(num_classes=Config.NUM_CLASSES)
+        model = CustomLightViT(num_classes=num_classes)
     elif args.model == 'mobilevit_xxs':
-        model = CustomMobileViT(num_classes=Config.NUM_CLASSES)
+        model = CustomMobileViT(num_classes=num_classes)
     else:
-        model = timm.create_model(args.model, pretrained=False, num_classes=Config.NUM_CLASSES)
+        model = timm.create_model(args.model, pretrained=False, num_classes=num_classes)
     
     model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
     print(f"[*] Params    : {total_params / 1e6:.2f} M")
     
+    # === 知识蒸馏 Teacher ===
+    teacher_path = f'./teacher/{args.dataset.upper()}_ResNet50_Teacher.pth'
+    print(f"正在加载 High-Quality KD 教师模型 ({teacher_path})...")
+    try:
+        teacher_model = tv_models.resnet50(weights=None)
+        teacher_model.fc = nn.Linear(teacher_model.fc.in_features, num_classes)
+        
+        # === 适配 32x32 图像 Stem ===
+        if dataset_info['img_size'] <= 64:
+            teacher_model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            teacher_model.maxpool = nn.Identity()
+        
+        if os.path.exists(teacher_path):
+            state_dict = torch.load(teacher_path, map_location='cpu')
+            teacher_model.load_state_dict(state_dict)
+            teacher_model = teacher_model.to(device)
+            teacher_model.eval()
+            for param in teacher_model.parameters():
+                param.requires_grad = False
+            print(f"[*] Teacher   : Loaded High-Quality ResNet50 for {args.dataset.upper()}. Ready for KD.")
+        else:
+            print(f"[!] Warning: {teacher_path} not found. Run train_teacher.py --dataset {args.dataset} first. Training WITHOUT KD.")
+            teacher_model = None
+    except Exception as e:
+        print(f"[*] Teacher   : Failed to load ({e}). Training WITHOUT KD.")
+        teacher_model = None
+        
     ema = ModelEmaV2(model, decay=Config.EMA_DECAY, device=device)
     print(f"[*] EMA       : Enabled (decay={Config.EMA_DECAY})")
     print("-" * 70)
 
-    save_dir = os.path.join(Config.SAVE_DIR_BASE, args.model)
+    save_dir = os.path.join(Config.SAVE_DIR_BASE, f"{args.dataset}_{args.model}")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, 'best_model.pth')
     ema_save_path = os.path.join(save_dir, 'best_model_ema.pth')
@@ -79,16 +140,18 @@ def main():
         switch_prob=Config.SWITCH_PROB, 
         mode='batch',
         label_smoothing=Config.LABEL_SMOOTHING, 
-        num_classes=Config.NUM_CLASSES
+        num_classes=num_classes
     )
     
     criterion = SoftTargetCrossEntropy()
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=Config.LR, weight_decay=Config.WEIGHT_DECAY)
+    # == 应用 Weight Decay 的参数组解耦 ==
+    optim_parameters = split_weight_decay(model, weight_decay=Config.WEIGHT_DECAY)
+    optimizer = torch.optim.AdamW(optim_parameters, lr=Config.LR)
     
     def lr_lambda(epoch):
         warmup_epochs = 15
-        hold_epochs = 100
+        hold_epochs = 60
         if epoch < warmup_epochs:
             return float(epoch + 1) / float(max(1, warmup_epochs))
         elif epoch < hold_epochs:
@@ -116,7 +179,7 @@ def main():
         
         current_lr = scheduler.get_last_lr()[0]
         
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, device, mixup_fn, ema)
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, device, mixup_fn, ema, teacher_model)
         
         val_acc = evaluate(model, val_loader, device)
         ema_val_acc = evaluate(ema.module, val_loader, device)

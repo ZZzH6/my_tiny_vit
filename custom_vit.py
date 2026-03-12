@@ -59,71 +59,85 @@ class CoordinateAttention(nn.Module):
 
 class CustomLightViT(nn.Module):
     """
-    经过四大架构升级的终极版 CustomLightViT：
-    1. 【更深度的局域感知】: Convolutional Stem 内部使用 Hardswish 并在进入 Transformer 前立即融合一次早期 CA 注意力。
-    2. 【破除静态诅咒】: 抛弃绝对位置编码，引入动态响应的条件位置编码 (CPE)，极大地提升对 RandomCrop 和 RandomErasing 的鲁棒性。
-    3. 【纯粹的全局池化】: 抛弃格格不入的 CLS Token，完全利用深度 CA 重标定后的密集空间特征做 GAP 分类。
-    4. 【全网络量化就绪】: 全流程剔除指数类算子。
+    终极版 CustomLightViT (冲击 90%+) - 引入层级化架构与多尺度特征
+    1. 【高分辨率浅层 Stage 1】: 16x16 解析度，使用前期 Transformer 捕获细粒度特征。
+    2. 【Patch Merging】: 空间降采样 (16x16 -> 8x8) 且通道翻倍，构建金字塔结构。
+    3. 【深层全局交互 Stage 2】: 8x8 解析度，高通道数，负责全局语义。
+    4. 【双重 CPE 注入】: 在每个 Stage 提供局部位置感知。
     """
-    def __init__(self, num_classes=100, embed_dim=192, depth=6, num_heads=3, drop_rate=0.1, drop_path_rate=0.2):
+    def __init__(self, num_classes=100, embed_dim=256, depth=8, num_heads=4, drop_rate=0.1, drop_path_rate=0.2):
         super(CustomLightViT, self).__init__()
         
-        self.H = 8 
-        self.W = 8
-        self.embed_dim = embed_dim
+        # 初始特征维度 (适配金字塔结构)
+        dim_stage1 = embed_dim // 2  # 例如 96
+        dim_stage2 = embed_dim       # 例如 192
         
-        # 优化点1 & 4：Convolutional Stem，结合 Hardswish
+        # 1. 更加轻量的 Conv Stem (输出保留较高分辨率: 原尺寸 64x64 -> 16x16)
+        # stride=2 产生 32x32, 再次 stride=2 产生 16x16
         self.patch_embed = nn.Sequential(
-            nn.Conv2d(3, embed_dim // 4, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(embed_dim // 4),
+            nn.Conv2d(3, dim_stage1 // 2, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(dim_stage1 // 2),
             nn.Hardswish(inplace=True),
             
-            nn.Conv2d(embed_dim // 4, embed_dim // 2, kernel_size=3, stride=2, padding=1, bias=False),
-            nn.BatchNorm2d(embed_dim // 2),
-            nn.Hardswish(inplace=True),
-            
-            nn.Conv2d(embed_dim // 2, embed_dim, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(embed_dim),
+            nn.Conv2d(dim_stage1 // 2, dim_stage1, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(dim_stage1),
             nn.Hardswish(inplace=True)
         )
         
-        # 优化点2：CA 深度下放 - 早期空间感知模块
-        # 在 Patch 进入自注意力的无序交互前，强制其进行一次深度的空间坐标交叉门控
-        self.ca_early = CoordinateAttention(inp=embed_dim, oup=embed_dim, reduction=32)
+        self.ca_early = CoordinateAttention(inp=dim_stage1, oup=dim_stage1, reduction=16)
 
-        # 优化点3：CPE (Conditional Positional Encoding)
-        # 用带 padding 的深度可分离卷积，动态赋予二维特征图位置偏移信息 (取代了 self.pos_embed)
-        self.cpe = nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=1, padding=1, groups=embed_dim, bias=True)
-
-        # 随机深度率
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        # Stage 1 (高分辨率、较少通道)
+        self.cpe_stage1 = nn.Conv2d(dim_stage1, dim_stage1, kernel_size=3, stride=1, padding=1, groups=dim_stage1, bias=True)
         
-        # 核心堆叠 (Timm Block 本身非常高效且支持 DropPath)
-        self.blocks = nn.Sequential(*[
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        depth_s1 = depth // 2
+        depth_s2 = depth - depth_s1
+        
+        self.blocks_stage1 = nn.Sequential(*[
             timm.models.vision_transformer.Block(
-                dim=embed_dim, 
+                dim=dim_stage1, 
                 num_heads=num_heads, 
-                mlp_ratio=2.0, 
+                mlp_ratio=4.0,  # 恢复到高容量 4.0
                 qkv_bias=True, 
                 proj_drop=drop_rate, 
-                attn_drop=drop_rate, 
+                attn_drop=0.0,  # 移除 attn_drop
                 drop_path=dpr[i]
             )
-            for i in range(depth)
+            for i in range(depth_s1)
         ])
         
-        self.norm = nn.LayerNorm(embed_dim)
+        # Patch Merging (空间减半 16x16->8x8，通道数翻倍 dim_s1->dim_s2)
+        self.downsample = nn.Sequential(
+            nn.BatchNorm2d(dim_stage1),
+            nn.Conv2d(dim_stage1, dim_stage2, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(dim_stage2),
+            nn.Hardswish(inplace=True)
+        )
         
-        # 深层网络末端，分类之前的 CA 重标定模块
-        self.ca_late = CoordinateAttention(inp=embed_dim, oup=embed_dim, reduction=32)
-        
-        # 优化点1：彻底抛弃 CLS，改用基于特征图的全局平均池化
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        
-        self.head_drop = nn.Dropout(drop_rate)
-        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        self.ca_mid = CoordinateAttention(inp=dim_stage2, oup=dim_stage2, reduction=8)
 
-        # 权重初始化
+        # Stage 2 (低分辨率、高通道)
+        self.cpe_stage2 = nn.Conv2d(dim_stage2, dim_stage2, kernel_size=3, stride=1, padding=1, groups=dim_stage2, bias=True)
+        
+        self.blocks_stage2 = nn.Sequential(*[
+            timm.models.vision_transformer.Block(
+                dim=dim_stage2, 
+                num_heads=num_heads, 
+                mlp_ratio=4.0, # 恢复到 4.0 
+                qkv_bias=True, 
+                proj_drop=drop_rate, 
+                attn_drop=0.0, 
+                drop_path=dpr[depth_s1 + i]
+            )
+            for i in range(depth_s2)
+        ])
+        
+        self.norm = nn.LayerNorm(dim_stage2)
+        self.ca_out = CoordinateAttention(inp=dim_stage2, oup=dim_stage2, reduction=8)
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.head_drop = nn.Dropout(drop_rate)
+        self.head = nn.Linear(dim_stage2, num_classes) if num_classes > 0 else nn.Identity()
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -140,23 +154,29 @@ class CustomLightViT(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward_features(self, x):
-        # 1. 局部提取: [B, 3, 32, 32] -> [B, C, 8, 8]
+        # 1. Stem (输入 64x64 -> 16x16)
         x = self.patch_embed(x)
-        B, C, H, W = x.shape
-        
-        # 2. 浅层级联坐标注意力 (CA 下放)
         x = self.ca_early(x)
         
-        # 3. 注入动态位置信息 (CPE 残差模块)
-        x = x + self.cpe(x)
-        
-        # 4. 转换维度适配 Transformer: [B, C, H, W] -> [B, N, C]
+        # ———— Stage 1 (High Res: 16x16) ————
+        x = x + self.cpe_stage1(x)
+        B, C1, H1, W1 = x.shape
         x = x.flatten(2).transpose(1, 2)
+        x = self.blocks_stage1(x)
         
-        # 5. 深层全局交互 (Self-Attention)
-        x = self.blocks(x)
+        # ———— Patch Merging (16x16 -> 8x8) ————
+        x = x.transpose(1, 2).view(B, C1, H1, W1)
+        x = self.downsample(x)
+        x = self.ca_mid(x)
+        
+        # ———— Stage 2 (Low Res: 8x8) ————
+        x = x + self.cpe_stage2(x)
+        B, C2, H2, W2 = x.shape
+        x = x.flatten(2).transpose(1, 2)
+        x = self.blocks_stage2(x)
         x = self.norm(x)
-        return x, H, W
+        
+        return x, H2, W2
 
     def forward(self, x):
         # 获得序列化的高阶特征
@@ -167,7 +187,7 @@ class CustomLightViT(nn.Module):
         x = x.transpose(1, 2).view(B, C, H, W)
         
         # 进行最后一次基于空间特征重标定的 CA
-        x = self.ca_late(x)
+        x = self.ca_out(x)
         
         # 进行全局空间特征池化 (不再依赖孤零零的 CLS Token)
         x = self.global_pool(x).flatten(1)
