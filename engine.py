@@ -4,7 +4,7 @@ from torch.cuda.amp import autocast
 from timm.utils import accuracy
 from config import Config
 
-def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, device, mixup_fn, ema=None, teacher_model=None):
+def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, device, mixup_fn, ema=None, teacher_model=None, kd_alpha=0.0):
     model.train()
     if teacher_model is not None:
         teacher_model.eval()
@@ -22,23 +22,22 @@ def train_one_epoch(model, dataloader, criterion, optimizer, scheduler, scaler, 
             outputs = model(inputs)
             
             # 知识蒸馏逻辑 (Teacher-Student KD)
-            if teacher_model is not None:
+            if teacher_model is not None and kd_alpha > 0.0:
                 with torch.no_grad():
                     teacher_outputs = teacher_model(inputs)
                 
                 # 真实标签的 Soft Lable Loss (由于 mixup, targets 已经是 shape [B, 100])
                 loss_ce = criterion(outputs, targets)
                 
-                # 教师特征软标签 KL散度 (Temperature=2.0)
-                T = 2.0 
+                # 教师软标签 KL 散度
+                temperature = Config.KD_TEMPERATURE
                 loss_kd = F.kl_div(
-                    F.log_softmax(outputs / T, dim=1),
-                    F.softmax(teacher_outputs / T, dim=1),
+                    F.log_softmax(outputs / temperature, dim=1),
+                    F.softmax(teacher_outputs / temperature, dim=1),
                     reduction='batchmean'
-                ) * (T * T)
+                ) * (temperature * temperature)
                 
-                # KD Alpha=0.6 (稍微平衡 Teacher 与真值的权重)
-                loss = 0.4 * loss_ce + 0.6 * loss_kd
+                loss = (1.0 - kd_alpha) * loss_ce + kd_alpha * loss_kd
             else:
                 loss = criterion(outputs, targets)
         

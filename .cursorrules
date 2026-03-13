@@ -1,32 +1,16 @@
-# AI Agent Rules for Thesis Project
-# 课题名称: 《基于Transformer的轻量化图像分类算法的系统设计与实现》
+# Agent Rules
 
-## Role & Description
-You are an expert Deep Learning Engineer and Academic Advisor assisting with a Master's/Undergrad thesis.
-Your main focus is on PyTorch, Vision Transformers (ViT), Model Compression, Compute Complexity (FLOPs/Params), and Empirical Performance.
-Always communicate clearly in Chinese, keeping technical terms (Attention, PatchEmbed, FLOPs, EMA, etc.) in English.
+## Language
+Always answer in Chinese.
 
-## Project Context
-- **Goal:** Achieve high image classification accuracy on CIFAR-100 / ImageNet subsets while strictly minimizing parameters, FLOPs, and maximizing throughput.
-- **Reference Models:** ViT-Base (Heavy Baseline), MobileViT, DeiT-Tiny (Lightweight Baselines), CustomLightViT (Proposed Contribution with Coordinate Attention, feature fusion strategies).
-- **Core Trade-offs:** The struggle between resolution mismatch, shallow attention bottlenecks versus computational budgets.
+## Code Explanation
+When explaining code:
+- explain the purpose of each module
+- explain the training pipeline
+- explain model architecture
 
-## Code Standards
-1. **Modularity:** Keep network structures (`custom_vit.py`, etc.), training loops (`engine.py`, `train.py`), data loading, and utilities isolated.
-2. **Type Hinting & Docstrings:** Always use PyTorch type hints `(x: torch.Tensor)` and describe tensor shapes `(B, C, H, W) -> (B, N, D)`.
-3. **Reproducibility:** Seed everything (`torch`, `numpy`, `random`).
-4. **Hardware Agnostic:** Code must support CPU/GPU/MPS gracefully.
-
-## Experimentation & Evaluation Rules
-1. **Fair Comparison:** When comparing customized networks, maintain strictly identical data augmentations (MixUp, CutMix), epochs, learning rate schedulers, and weight initialization (`trunc_normal_`).
-2. **Troubleshooting & Optimization:** Pay extra attention to Transformer specific issues:
-   - Carefully tune EMA decay parameters when suffering from convergence lag (e.g. 0.9998 to 0.999 for smaller datasets).
-   - Carefully adjust weight decay to avoid penalizing `bias` and `norm` layers.
-   - Use correct normalization statistics specific to the dataset (e.g., CIFAR-100 vs ImageNet).
-3. **Tracking & Visualization:** Ensure `train.log` stores `Loss, Top-1, Top-5 Acc, LR, Time`. Facilitate TensorBoard or Matplotlib scripts ready for thesis insertion.
-
-## Workflow & Communication
-1. **Think Before Coding:** Explain the *Why* (theory/reasoning) and *What* (affected components) before making large codebase edits.
-2. **Task & Implementation Planning:** Follow agentic task-tracking methods using task boundary schemas before executing large logic changes.
-3. **Thesis Driven Output:** When an experiment finishes, aid in analyzing the structural design bottlenecks and trade-offs suitable for paper writing.
-
+## Optimization Suggestions
+When suggesting improvements:
+- explain why the change is useful
+- provide the modified code
+- focus on deep learning model performance and efficiency

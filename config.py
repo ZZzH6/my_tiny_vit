@@ -8,24 +8,34 @@ class Config:
     BATCH_SIZE = 256 
     NUM_WORKERS = 16  
     SEED = 42
-    EPOCHS = 400         
-    LR = 1e-3         
-    WEIGHT_DECAY = 0.05   
-    LABEL_SMOOTHING = 0.1
+    EPOCHS = 360
+    LR = 8e-4
+    WEIGHT_DECAY = 0.025
+    LABEL_SMOOTHING = 0.03
     GRAD_CLIP_NORM = 1.0  
-    EMA_DECAY = 0.9995    
+    EMA_DECAY = 0.999
     DATA_DIR = './data'
     SAVE_DIR_BASE = './lightweight_saved'
 
     # 学习率调度参数
-    WARMUP_EPOCHS = 30
-    HOLD_EPOCHS = 30
+    WARMUP_EPOCHS = 10
+    HOLD_EPOCHS = 0
+
+    # 知识蒸馏参数
+    KD_TEMPERATURE = 3.0
+    KD_ALPHA = 0.4
+    KD_DECAY_START_RATIO = 0.6
 
     # Mixup 配置参数
-    MIXUP_ALPHA = 0.3
+    MIXUP_ALPHA = 0.15
     # 由于原始分辨率仅 32x32, 强烈的 CutMix 破坏性极强，降低其介入概率或 Alpha
     CUTMIX_ALPHA = 0.0
-    PROB = 0.3       # 1.0 -> 0.3 (允许模型看更多干净样本，加快收敛)
+    PROB = 0.15
     SWITCH_PROB = 0.0
+
+    # 最后阶段做 clean fine-tune，去掉蒸馏和混合增强
+    FINETUNE_EPOCHS = 40
+    FINETUNE_LR = 5e-5
+    FINETUNE_LABEL_SMOOTHING = 0.0
 
 os.makedirs(Config.SAVE_DIR_BASE, exist_ok=True)

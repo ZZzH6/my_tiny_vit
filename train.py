@@ -19,7 +19,7 @@ from timm.loss import SoftTargetCrossEntropy
 from config import Config
 from datasets import get_dataloaders, get_available_datasets
 from engine import train_one_epoch, evaluate
-    from utils import setup_device, print_header, set_seed
+from utils import setup_device, print_header, set_seed
 from custom_vit import CustomLightViT
 from models import CustomMobileViT
 # ---------------------------------
@@ -55,6 +55,30 @@ def split_weight_decay(model, weight_decay=0.05):
         {'params': decay, 'weight_decay': weight_decay}
     ]
 
+def get_kd_alpha(epoch: int):
+    """
+    分阶段蒸馏权重:
+      - 前期保持基础 KD 权重
+      - 中后期线性衰减
+      - 最后 FINETUNE_EPOCHS 关闭 KD
+    epoch 为 1-based
+    """
+    finetune_start = max(1, Config.EPOCHS - Config.FINETUNE_EPOCHS + 1)
+    decay_start = max(1, int((finetune_start - 1) * Config.KD_DECAY_START_RATIO))
+
+    if epoch >= finetune_start:
+        return 0.0
+    if epoch <= decay_start:
+        return Config.KD_ALPHA
+
+    decay_span = max(1, finetune_start - decay_start)
+    progress = float(epoch - decay_start) / float(decay_span)
+    return Config.KD_ALPHA * max(0.0, 1.0 - progress)
+
+def is_finetune_epoch(epoch: int):
+    finetune_start = max(1, Config.EPOCHS - Config.FINETUNE_EPOCHS + 1)
+    return epoch >= finetune_start
+
 def main():
     args = parse_args()
     set_seed(Config.SEED)
@@ -72,6 +96,11 @@ def main():
     print(f"[*] EMA Decay : {Config.EMA_DECAY}")
     print(f"[*] Warmup    : {Config.WARMUP_EPOCHS}")
     print(f"[*] Hold      : {Config.HOLD_EPOCHS}")
+    print(f"[*] KD Temp   : {Config.KD_TEMPERATURE}")
+    print(f"[*] KD Alpha  : {Config.KD_ALPHA}")
+    print(f"[*] KD Decay  : {Config.KD_DECAY_START_RATIO}")
+    print(f"[*] Finetune  : {Config.FINETUNE_EPOCHS}")
+    print(f"[*] FT LR     : {Config.FINETUNE_LR}")
     print(f"[*] Mixup P   : {Config.PROB}")
     print("-" * 70)
 
@@ -142,20 +171,34 @@ def main():
         num_classes=num_classes
     )
     
-    criterion = SoftTargetCrossEntropy()
+    train_criterion = SoftTargetCrossEntropy()
+    finetune_criterion = nn.CrossEntropyLoss(label_smoothing=Config.FINETUNE_LABEL_SMOOTHING)
 
     # == 应用 Weight Decay 的参数组解耦 ==
     optim_parameters = split_weight_decay(model, weight_decay=Config.WEIGHT_DECAY)
     optimizer = torch.optim.AdamW(optim_parameters, lr=Config.LR)
     
     def lr_lambda(epoch):
-        if epoch < Config.WARMUP_EPOCHS:
-            return float(epoch + 1) / float(max(1, Config.WARMUP_EPOCHS))
-        elif epoch < Config.HOLD_EPOCHS:
+        warmup_epochs = Config.WARMUP_EPOCHS
+        hold_epochs = Config.HOLD_EPOCHS
+        finetune_epochs = Config.FINETUNE_EPOCHS
+        finetune_start = max(0, Config.EPOCHS - finetune_epochs)
+        decay_start = warmup_epochs + hold_epochs
+        decay_end = max(decay_start + 1, finetune_start)
+        finetune_factor = Config.FINETUNE_LR / Config.LR
+
+        if epoch < warmup_epochs:
+            return float(epoch + 1) / float(max(1, warmup_epochs))
+        if epoch < decay_start:
             return 1.0
-        else:
-            progress = float(epoch - Config.HOLD_EPOCHS) / float(max(1, Config.EPOCHS - Config.HOLD_EPOCHS))
-            return 0.5 * (1.0 + math.cos(math.pi * progress))
+        if epoch >= finetune_start:
+            return finetune_factor
+
+        total_decay_epochs = max(1, decay_end - decay_start)
+        progress = float(epoch - decay_start) / float(total_decay_epochs)
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return finetune_factor + (1.0 - finetune_factor) * cosine
             
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     
@@ -176,7 +219,23 @@ def main():
         
         current_lr = scheduler.get_last_lr()[0]
         
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, scheduler, scaler, device, mixup_fn, ema, teacher_model)
+        current_kd_alpha = get_kd_alpha(epoch)
+        current_mixup_fn = None if is_finetune_epoch(epoch) else mixup_fn
+        current_criterion = finetune_criterion if is_finetune_epoch(epoch) else train_criterion
+
+        train_loss = train_one_epoch(
+            model,
+            train_loader,
+            current_criterion,
+            optimizer,
+            scheduler,
+            scaler,
+            device,
+            current_mixup_fn,
+            ema,
+            teacher_model,
+            current_kd_alpha,
+        )
         
         val_acc = evaluate(model, val_loader, device)
         ema_val_acc = evaluate(ema.module, val_loader, device)
