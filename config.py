@@ -38,4 +38,39 @@ class Config:
     FINETUNE_LR = 5e-5
     FINETUNE_LABEL_SMOOTHING = 0.0
 
-os.makedirs(Config.SAVE_DIR_BASE, exist_ok=True)
+
+_DEFAULT_CONFIG_VALUES = {
+    key: value
+    for key, value in vars(Config).items()
+    if key.isupper()
+}
+
+
+def _ensure_runtime_dirs():
+    os.makedirs(Config.SAVE_DIR_BASE, exist_ok=True)
+
+
+def reset_runtime_config():
+    for key, value in _DEFAULT_CONFIG_VALUES.items():
+        setattr(Config, key, value)
+    _ensure_runtime_dirs()
+
+
+def apply_runtime_overrides(overrides: dict):
+    unknown_keys = [key for key in overrides if key not in _DEFAULT_CONFIG_VALUES]
+    if unknown_keys:
+        raise KeyError(f"Unknown config override keys: {unknown_keys}")
+
+    for key, value in overrides.items():
+        setattr(Config, key, value)
+    _ensure_runtime_dirs()
+
+
+def get_active_config():
+    return {
+        key: getattr(Config, key)
+        for key in _DEFAULT_CONFIG_VALUES
+    }
+
+
+_ensure_runtime_dirs()

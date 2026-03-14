@@ -7,7 +7,8 @@ __pycache__/
 # 忽略 PyTorch 训练保存的模型权重文件
 *.pth
 *.pt
-
+*.log
+*.json
 # 忽略训练过程输出的结果图表
 training_results.png
 log.txt

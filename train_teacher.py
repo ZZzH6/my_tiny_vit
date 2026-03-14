@@ -9,8 +9,14 @@ import torchvision.models as tv_models
 from datetime import datetime
 
 # Local imports
-from config import Config
-from datasets import get_dataloaders, get_available_datasets
+from config import Config, reset_runtime_config, apply_runtime_overrides
+from datasets import (
+    get_dataloaders,
+    get_available_datasets,
+    get_dataset_strategy_note,
+    get_dataset_teacher_overrides,
+    normalize_dataset_name,
+)
 from utils import setup_device, print_header, set_seed
 
 def evaluate(model, dataloader, device):
@@ -30,17 +36,58 @@ def evaluate(model, dataloader, device):
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a high-quality ResNet-50 teacher for Knowledge Distillation")
     parser.add_argument('--dataset', type=str, default='cifar100',
-                        choices=get_available_datasets(),
-                        help=f"Choose dataset to train teacher on (default: cifar100)")
+                        help=f"Choose dataset to train teacher on. Available: {', '.join(get_available_datasets())}")
+    parser.add_argument('--data-dir', type=str, default=None)
+    parser.add_argument('--batch-size', type=int, default=None)
+    parser.add_argument('--num-workers', type=int, default=None)
+    parser.add_argument('--epochs', type=int, default=40)
     return parser.parse_args()
+
+
+def format_overrides(overrides: dict):
+    if not overrides:
+        return "default profile"
+    return ', '.join(f"{key}={value}" for key, value in sorted(overrides.items()))
 
 def main():
     args = parse_args()
+    args.dataset = normalize_dataset_name(args.dataset)
+    reset_runtime_config()
+
+    dataset_strategy = get_dataset_teacher_overrides(args.dataset)
+    if dataset_strategy:
+        apply_runtime_overrides(dataset_strategy)
+
+    manual_overrides = {}
+    if args.data_dir is not None:
+        Config.DATA_DIR = args.data_dir
+        manual_overrides['DATA_DIR'] = args.data_dir
+    if args.batch_size is not None:
+        Config.BATCH_SIZE = args.batch_size
+        manual_overrides['BATCH_SIZE'] = args.batch_size
+    if args.num_workers is not None:
+        Config.NUM_WORKERS = args.num_workers
+        manual_overrides['NUM_WORKERS'] = args.num_workers
+    if args.epochs <= 0:
+        raise ValueError("--epochs must be positive.")
+    if Config.BATCH_SIZE <= 0:
+        raise ValueError("Config.BATCH_SIZE must be positive.")
+    if Config.NUM_WORKERS < 0:
+        raise ValueError("Config.NUM_WORKERS must be non-negative.")
+
     set_seed(Config.SEED)
     device = setup_device()
     
     dataset_name = args.dataset.upper()
     print_header(f"TRAINING HIGH-QUALITY RESNET-50 TEACHER FOR {dataset_name}")
+    print(f"[*] Dataset   : {dataset_name}")
+    print(f"[*] Data Dir  : {Config.DATA_DIR}")
+    print(f"[*] Strategy  : {get_dataset_strategy_note(args.dataset)}")
+    print(f"[*] Auto HP   : {format_overrides(dataset_strategy)}")
+    print(f"[*] CLI HP    : {format_overrides(manual_overrides)}")
+    print(f"[*] Batch     : {Config.BATCH_SIZE}")
+    print(f"[*] Workers   : {Config.NUM_WORKERS}")
+    print(f"[*] Epochs    : {args.epochs}")
     
     # 1. 准备数据 (通过 Dataset Registry 自动加载)
     train_loader, val_loader, _, dataset_info = get_dataloaders(
@@ -48,7 +95,7 @@ def main():
         data_dir=Config.DATA_DIR, dataset=args.dataset
     )
     num_classes = dataset_info['num_classes']
-    print(f"[*] Dataset   : {dataset_name} ({num_classes} classes)")
+    print(f"[*] Classes   : {num_classes}")
     
     # 2. 构建模型
     print("Loading pre-trained ResNet50...")
@@ -72,7 +119,7 @@ def main():
     model = model.to(device)
     
     # 教师模型独立配置 (我们用标准的交叉熵，并不使用 Mixup)
-    teacher_epochs = 40
+    teacher_epochs = args.epochs
     criterion = nn.CrossEntropyLoss()
     
     # === 优化: 权重衰减优化 (Bias 与 Norm 层解除抑制) ===
