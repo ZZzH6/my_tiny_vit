@@ -119,6 +119,35 @@ def _seed_worker(worker_id):
     np.random.seed(worker_seed)
 
 
+def _build_eval_loader(cfg, split: str):
+    root = Path(_get(cfg, "data", "root", default="dataset/tiny-imagenet-200"))
+    batch_size = int(_get(cfg, "data", "batch_size", default=64))
+    num_workers = int(_get(cfg, "data", "num_workers", default=4))
+    seed = int(_get(cfg, "train", "seed", default=42))
+
+    if split not in {"train", "val"}:
+        raise ValueError(f"Unsupported split: {split}. Expected 'train' or 'val'.")
+
+    data_root = root / split
+    _validate_imagefolder_root(data_root, split)
+
+    dataset = datasets.ImageFolder(data_root, transform=_build_val_transform(cfg))
+    generator = torch.Generator()
+    generator.manual_seed(seed + (0 if split == "train" else 1))
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        worker_init_fn=_seed_worker,
+        generator=generator,
+    )
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+    loader = DataLoader(dataset, **loader_kwargs)
+    return loader, dataset
+
+
 def build_loader(cfg):
     root = Path(_get(cfg, "data", "root", default="dataset/tiny-imagenet-200"))
     batch_size = int(_get(cfg, "data", "batch_size", default=64))
@@ -178,3 +207,7 @@ def build_loader(cfg):
         generator=val_generator,
     )
     return train_loader, val_loader, mixup_fn
+
+
+def build_eval_loader(cfg, split: str = "val"):
+    return _build_eval_loader(cfg, split)
