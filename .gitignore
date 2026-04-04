@@ -9,12 +9,3 @@ __pycache__/
 *.pt
 *.log
 *.json
-# 忽略训练过程输出的结果图表
-training_results.png
-log.txt
-pytorch_model.bin
-deit.log
-train.log
-mobilevit.log
-training_log.csv
-train_1.log
