@@ -40,14 +40,10 @@ def _validate_imagefolder_root(path: Path, split: str) -> None:
         )
 
 
-def _build_train_transform(cfg):
+def _build_pad_resize_train_transform(cfg):
     img_size = int(_get(cfg, "data", "img_size", default=224))
     crop_padding = int(_get(cfg, "data", "train_crop_padding", default=4))
-    randaugment_num_ops = int(_get(cfg, "data", "randaugment_num_ops", default=2))
-    randaugment_magnitude = int(_get(cfg, "data", "randaugment_magnitude", default=9))
-    random_erasing_prob = float(_get(cfg, "data", "random_erasing_prob", default=0.25))
-
-    ops = [
+    return [
         transforms.RandomCrop(TINY_IMAGE_SIZE, padding=crop_padding, padding_mode="reflect"),
         transforms.RandomHorizontalFlip(),
         transforms.Resize(
@@ -56,6 +52,46 @@ def _build_train_transform(cfg):
             antialias=True,
         ),
     ]
+
+
+def _build_random_resized_crop_train_transform(cfg):
+    img_size = int(_get(cfg, "data", "img_size", default=224))
+    crop_scale = (
+        float(_get(cfg, "data", "train_crop_scale_min", default=0.6)),
+        float(_get(cfg, "data", "train_crop_scale_max", default=1.0)),
+    )
+    crop_ratio = (
+        float(_get(cfg, "data", "train_crop_ratio_min", default=0.75)),
+        float(_get(cfg, "data", "train_crop_ratio_max", default=1.3333333333333333)),
+    )
+    return [
+        transforms.RandomResizedCrop(
+            img_size,
+            scale=crop_scale,
+            ratio=crop_ratio,
+            interpolation=InterpolationMode.BICUBIC,
+            antialias=True,
+        ),
+        transforms.RandomHorizontalFlip(),
+    ]
+
+
+def _build_train_transform(cfg):
+    randaugment_num_ops = int(_get(cfg, "data", "randaugment_num_ops", default=2))
+    randaugment_magnitude = int(_get(cfg, "data", "randaugment_magnitude", default=9))
+    random_erasing_prob = float(_get(cfg, "data", "random_erasing_prob", default=0.25))
+    train_crop_mode = str(_get(cfg, "data", "train_crop_mode", default="random_resized_crop")).lower()
+
+    if train_crop_mode in {"pad_crop", "random_crop"}:
+        ops = _build_pad_resize_train_transform(cfg)
+    elif train_crop_mode in {"random_resized_crop", "rrc"}:
+        ops = _build_random_resized_crop_train_transform(cfg)
+    else:
+        raise ValueError(
+            f"Unsupported data.train_crop_mode={train_crop_mode!r}. "
+            "Expected 'random_resized_crop' or 'pad_crop'."
+        )
+
     if randaugment_num_ops > 0 and randaugment_magnitude > 0:
         ops.append(
             transforms.RandAugment(

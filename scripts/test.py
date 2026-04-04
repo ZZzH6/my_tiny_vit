@@ -16,6 +16,7 @@ from data.build_loader import build_eval_loader
 from engine.evaluator import evaluate
 from models.baseline_models import build_model
 from utils.artifacts import build_run_paths, dump_json
+from utils.model_zoo import resolve_model_zoo_best_checkpoint
 from utils.reproducibility import seed_everything
 
 
@@ -32,7 +33,11 @@ def _get(cfg, *keys, default=None):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
-    parser.add_argument("--checkpoint", required=True, help="Path to *_best.pt or *_last.pt checkpoint.")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Optional path to a specific checkpoint. If omitted, use results/models/<model_name>/best.pt.",
+    )
     parser.add_argument("--split", default="val", choices=["train", "val"])
     return parser.parse_args()
 
@@ -61,6 +66,7 @@ def _print_result(result: dict[str, Any], eval_path: Path) -> None:
     print("=" * 80)
     print(f"model_name    : {result['model_name']}")
     print(f"checkpoint    : {result['checkpoint_path']}")
+    print(f"checkpoint src: {result['checkpoint_source']}")
     print(f"dataset_root  : {result['dataset_root']}")
     print(f"split         : {result['split']}")
     print(f"top1          : {result['top1']:.2f}%")
@@ -73,7 +79,6 @@ def _print_result(result: dict[str, Any], eval_path: Path) -> None:
 def main():
     args = parse_args()
     config_path = Path(args.config).resolve()
-    checkpoint_path = Path(args.checkpoint).expanduser().resolve()
 
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
@@ -89,11 +94,16 @@ def main():
     else:
         device = torch.device("cpu")
 
+    model_cfg = cfg["model"]
+    data_cfg = cfg["data"]
+    if args.checkpoint is not None:
+        checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+    else:
+        checkpoint_path, _ = resolve_model_zoo_best_checkpoint(ROOT / "results", model_cfg["name"])
+
     checkpoint = _load_checkpoint(checkpoint_path)
     _require_keys(checkpoint, ["model_state"], f"checkpoint {checkpoint_path}")
 
-    model_cfg = cfg["model"]
-    data_cfg = cfg["data"]
     model = build_model(
         model_name=model_cfg["name"],
         num_classes=int(model_cfg["num_classes"]),
@@ -117,6 +127,7 @@ def main():
     result = {
         "model_name": model_cfg["name"],
         "checkpoint_path": str(checkpoint_path),
+        "checkpoint_source": "manual" if args.checkpoint is not None else "model_zoo",
         "dataset_root": str(Path(data_cfg["root"]).resolve()),
         "split": args.split,
         "top1": float(eval_metrics["top1"]),

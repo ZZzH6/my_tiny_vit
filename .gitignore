@@ -37,6 +37,7 @@ results/checkpoints/
 results/metrics/
 results/summary/
 results/eval/
+results/models/
 results/figures/
 results/tables/
 outputs/

@@ -21,8 +21,9 @@ from data.build_loader import build_loader
 from engine.evaluator import evaluate
 from engine.trainer import train_one_epoch
 from models.baseline_models import build_model
-from utils.artifacts import build_run_paths, dump_csv, dump_json
+from utils.artifacts import build_model_zoo_paths, build_run_paths, dump_csv, dump_json
 from utils.model_profile import profile_model
+from utils.model_zoo import sync_model_zoo_best
 from utils.reproducibility import seed_everything
 
 METRIC_FIELDS = [
@@ -65,7 +66,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def _print_header(cfg, device, paths, profile, resume_from):
+def _print_header(cfg, device, paths, model_zoo_paths, profile, resume_from):
     model_cfg = cfg["model"]
     data_cfg = cfg["data"]
     train_cfg = cfg["train"]
@@ -79,6 +80,7 @@ def _print_header(cfg, device, paths, profile, resume_from):
     print(f"summary    : {paths['summary_path']}")
     print(f"best ckpt  : {paths['best_checkpoint_path']}")
     print(f"last ckpt  : {paths['last_checkpoint_path']}")
+    print(f"model zoo  : {model_zoo_paths['best_checkpoint_path']}")
     print(f"eval file  : {paths['eval_path']}")
     print(f"resume from: {resume_from if resume_from is not None else 'N/A'}")
     print(f"model      : {model_cfg['name']}  (pretrained={model_cfg['pretrained']})")
@@ -87,9 +89,11 @@ def _print_header(cfg, device, paths, profile, resume_from):
     print(f"img size   : {data_cfg['img_size']}")
     print(f"batch size : {data_cfg['batch_size']}")
     print(f"epochs     : {train_cfg['epochs']}")
+    print(f"train crop : {_get(cfg, 'data', 'train_crop_mode', default='random_resized_crop')}")
     print(f"lr         : {train_cfg['lr']}")
     print(f"wd         : {train_cfg['weight_decay']}")
     print(f"mixup      : {train_cfg['mixup_alpha']} / cutmix {train_cfg['cutmix_alpha']}")
+    print(f"mixup off  : {train_cfg.get('mixup_off_epoch', 0)} epochs")
     print(f"label_smooth: {train_cfg['label_smoothing']}")
     print(f"drop_path  : {model_cfg['drop_path_rate']}")
     print(f"warmup     : {train_cfg['warmup_epochs']} epochs")
@@ -146,6 +150,15 @@ def _build_criterion(cfg, use_mixup):
     return torch.nn.CrossEntropyLoss()
 
 
+def _mixup_enabled_for_epoch(mixup_fn, epoch_number, total_epochs, mixup_off_epoch):
+    if mixup_fn is None:
+        return False
+    mixup_off_epoch = max(0, int(mixup_off_epoch))
+    if mixup_off_epoch == 0:
+        return True
+    return epoch_number <= total_epochs - mixup_off_epoch
+
+
 def _cpu_state_dict(model):
     return {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
 
@@ -191,10 +204,19 @@ def _check_resume_compatibility(cfg, checkpoint_cfg):
         ("model.name", ("model", "name")),
         ("model.num_classes", ("model", "num_classes")),
         ("model.pretrained", ("model", "pretrained")),
+        ("model.drop_path_rate", ("model", "drop_path_rate")),
         ("data.dataset", ("data", "dataset")),
+        ("data.root", ("data", "root")),
         ("data.img_size", ("data", "img_size")),
+        ("data.batch_size", ("data", "batch_size")),
+        ("data.train_crop_mode", ("data", "train_crop_mode")),
         ("train.seed", ("train", "seed")),
         ("train.deterministic", ("train", "deterministic")),
+        ("train.lr", ("train", "lr")),
+        ("train.weight_decay", ("train", "weight_decay")),
+        ("train.label_smoothing", ("train", "label_smoothing")),
+        ("train.mixup_alpha", ("train", "mixup_alpha")),
+        ("train.cutmix_alpha", ("train", "cutmix_alpha")),
     ]
     for label, cfg_keys in required_pairs:
         current_value = _get(cfg, *cfg_keys)
@@ -293,12 +315,14 @@ def _build_common_payload(
         "dataset_root": str(Path(data_cfg["root"]).resolve()),
         "img_size": int(data_cfg["img_size"]),
         "batch_size": int(data_cfg["batch_size"]),
+        "train_crop_mode": str(_get(cfg, "data", "train_crop_mode", default="random_resized_crop")),
         "epochs_configured": int(train_cfg["epochs"]),
         "seed": int(seed),
         "deterministic": bool(deterministic),
         "pretrained": bool(model_cfg["pretrained"]),
         "mixup_alpha": float(train_cfg["mixup_alpha"]),
         "cutmix_alpha": float(train_cfg["cutmix_alpha"]),
+        "mixup_off_epoch": int(_get(cfg, "train", "mixup_off_epoch", default=0)),
         "label_smoothing": float(train_cfg["label_smoothing"]),
         "weight_decay": float(train_cfg["weight_decay"]),
         "drop_path_rate": float(model_cfg["drop_path_rate"]),
@@ -334,6 +358,7 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
         "dataset_root",
         "img_size",
         "batch_size",
+        "train_crop_mode",
         "epochs_configured",
         "epochs_completed",
         "seed",
@@ -341,6 +366,7 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
         "pretrained",
         "mixup",
         "cutmix",
+        "mixup_off_epoch",
         "label_smoothing",
         "weight_decay",
         "drop_path_rate",
@@ -356,6 +382,9 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
         "best_val_acc",
         "eval_top1",
         "eval_top5",
+        "model_zoo_best_val_acc",
+        "model_zoo_updated",
+        "model_zoo_existing_best_val_acc",
         "total_train_time_sec",
         "Params (M)",
         "FLOPs (G)",
@@ -369,6 +398,9 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
     for key in [
         "best_checkpoint_path",
         "last_checkpoint_path",
+        "model_zoo_dir",
+        "model_zoo_best_checkpoint_path",
+        "model_zoo_best_metadata_path",
         "log_path",
         "metrics_path",
         "summary_path",
@@ -406,6 +438,7 @@ def main():
         device = torch.device("cpu")
 
     paths, resume_checkpoint = _resolve_paths(cfg, args)
+    model_zoo_paths = build_model_zoo_paths(ROOT / "results", cfg["model"]["name"])
     for key in [
         "log_path",
         "metrics_path",
@@ -443,7 +476,8 @@ def main():
                 lr=base_lr,
                 weight_decay=float(_get(cfg, "train", "weight_decay", default=0.05)),
             )
-            criterion = _build_criterion(cfg, use_mixup=mixup_fn is not None)
+            mixup_criterion = _build_criterion(cfg, use_mixup=True)
+            hard_target_criterion = _build_criterion(cfg, use_mixup=False)
             amp_enabled = bool(_get(cfg, "train", "amp", default=True)) and device.type == "cuda"
             scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
             max_grad_norm = float(_get(cfg, "train", "max_grad_norm", default=1.0))
@@ -469,7 +503,7 @@ def main():
                 best_epoch = int(resume_checkpoint["best_epoch"])
                 total_train_time_sec = float(resume_checkpoint["total_train_time_sec"])
 
-            _print_header(cfg, device, paths, profile, resume_from)
+            _print_header(cfg, device, paths, model_zoo_paths, profile, resume_from)
 
             dump_csv(paths["metrics_path"], history, METRIC_FIELDS)
 
@@ -478,6 +512,7 @@ def main():
             min_lr = float(_get(cfg, "train", "min_lr", default=1e-6))
             early_stop_patience = int(_get(cfg, "train", "early_stop_patience", default=10))
             min_delta = float(_get(cfg, "train", "min_delta", default=0.0))
+            mixup_off_epoch = int(_get(cfg, "train", "mixup_off_epoch", default=0))
 
             stale_epochs = 0
             if current_epoch > 0:
@@ -490,13 +525,16 @@ def main():
                     param_group["lr"] = lr_now
 
                 start = time.perf_counter()
+                epoch_mixup_enabled = _mixup_enabled_for_epoch(
+                    mixup_fn, epoch_number, epochs_configured, mixup_off_epoch
+                )
                 train_loss = train_one_epoch(
                     model,
                     train_loader,
                     optimizer,
-                    criterion,
+                    mixup_criterion if epoch_mixup_enabled else hard_target_criterion,
                     device,
-                    mixup_fn=mixup_fn,
+                    mixup_fn=mixup_fn if epoch_mixup_enabled else None,
                     scaler=scaler,
                     max_grad_norm=max_grad_norm,
                 )
@@ -605,12 +643,35 @@ def main():
             }
             dump_json(paths["eval_path"], eval_result)
 
+            model_zoo_sync = sync_model_zoo_best(
+                ROOT / "results",
+                cfg["model"]["name"],
+                paths["best_checkpoint_path"],
+                {
+                    "run_id": paths["run_id"],
+                    "date_str": paths["date_str"],
+                    "config_path": cfg.get("_config_path"),
+                    "summary_path": str(paths["summary_path"]),
+                    "metrics_path": str(paths["metrics_path"]),
+                    "eval_path": str(paths["eval_path"]),
+                    "dataset": cfg["data"]["dataset"],
+                    "img_size": int(cfg["data"]["img_size"]),
+                    "batch_size": int(cfg["data"]["batch_size"]),
+                    "epochs_completed": int(current_epoch),
+                    "best_val_acc": float(best_acc),
+                    "eval_top1": float(eval_result["top1"]),
+                    "eval_top5": float(eval_result["top5"]),
+                    "type": "best",
+                },
+            )
+
             summary = {
                 "model_name": cfg["model"]["name"],
                 "dataset": cfg["data"]["dataset"],
                 "dataset_root": str(Path(cfg["data"]["root"]).resolve()),
                 "img_size": int(cfg["data"]["img_size"]),
                 "batch_size": int(cfg["data"]["batch_size"]),
+                "train_crop_mode": str(_get(cfg, "data", "train_crop_mode", default="random_resized_crop")),
                 "epochs_configured": int(cfg["train"]["epochs"]),
                 "epochs_completed": int(current_epoch),
                 "best_epoch": int(best_epoch),
@@ -620,6 +681,18 @@ def main():
                 "checkpoint_path": str(paths["best_checkpoint_path"]),
                 "best_checkpoint_path": str(paths["best_checkpoint_path"]),
                 "last_checkpoint_path": str(paths["last_checkpoint_path"]),
+                "model_zoo_dir": str(model_zoo_sync["paths"]["model_dir"]),
+                "model_zoo_best_checkpoint_path": str(model_zoo_sync["best_checkpoint_path"]),
+                "model_zoo_best_metadata_path": str(model_zoo_sync["best_metadata_path"]),
+                "model_zoo_best_val_acc": (
+                    float(model_zoo_sync["best_score"]) if model_zoo_sync["best_score"] is not None else None
+                ),
+                "model_zoo_existing_best_val_acc": (
+                    float(model_zoo_sync["existing_score"])
+                    if model_zoo_sync["existing_score"] is not None
+                    else None
+                ),
+                "model_zoo_updated": bool(model_zoo_sync["updated"]),
                 "log_path": str(paths["log_path"]),
                 "metrics_path": str(paths["metrics_path"]),
                 "summary_path": str(paths["summary_path"]),
@@ -632,6 +705,7 @@ def main():
                 "mixup_alpha": float(cfg["train"]["mixup_alpha"]),
                 "cutmix_alpha": float(cfg["train"]["cutmix_alpha"]),
                 "label_smoothing": float(cfg["train"]["label_smoothing"]),
+                "mixup_off_epoch": int(_get(cfg, "train", "mixup_off_epoch", default=0)),
                 "weight_decay": float(cfg["train"]["weight_decay"]),
                 "drop_path_rate": float(cfg["model"]["drop_path_rate"]),
                 "total_train_time_sec": float(total_train_time_sec),
@@ -642,7 +716,8 @@ def main():
                 "config_path": cfg.get("_config_path"),
                 "run_id": paths["run_id"],
                 "date_str": paths["date_str"],
-                "eval_command": (
+                "eval_command": f"python -u scripts/test.py --config {args.config}",
+                "eval_checkpoint_override_command": (
                     f"python -u scripts/test.py --config {args.config} "
                     f"--checkpoint {paths['best_checkpoint_path']} --split val"
                 ),
@@ -658,6 +733,15 @@ def main():
             last_ckpt["eval_result_path"] = str(paths["eval_path"])
             last_ckpt["best_checkpoint_path"] = str(paths["best_checkpoint_path"])
             last_ckpt["last_checkpoint_path"] = str(paths["last_checkpoint_path"])
+            last_ckpt["model_zoo_best_checkpoint_path"] = str(model_zoo_sync["best_checkpoint_path"])
+            last_ckpt["model_zoo_best_metadata_path"] = str(model_zoo_sync["best_metadata_path"])
+            last_ckpt["model_zoo_best_val_acc"] = (
+                float(model_zoo_sync["best_score"]) if model_zoo_sync["best_score"] is not None else None
+            )
+            last_ckpt["model_zoo_existing_best_val_acc"] = (
+                float(model_zoo_sync["existing_score"]) if model_zoo_sync["existing_score"] is not None else None
+            )
+            last_ckpt["model_zoo_updated"] = bool(model_zoo_sync["updated"])
             last_ckpt["epochs_completed"] = int(current_epoch)
             last_ckpt["best_val_acc"] = float(best_acc)
             last_ckpt["best_epoch"] = int(best_epoch)
@@ -669,6 +753,19 @@ def main():
             print(f"epochs completed: {current_epoch}/{epochs_configured}")
             print(f"best checkpoint saved to: {paths['best_checkpoint_path']}")
             print(f"last checkpoint saved to: {paths['last_checkpoint_path']}")
+            print(f"model zoo best path   : {model_zoo_sync['best_checkpoint_path']}")
+            prev_score = (
+                f"{model_zoo_sync['existing_score']:.2f}"
+                if model_zoo_sync["existing_score"] is not None
+                else "N/A"
+            )
+            best_score = (
+                f"{model_zoo_sync['best_score']:.2f}" if model_zoo_sync["best_score"] is not None else "N/A"
+            )
+            if model_zoo_sync["updated"]:
+                print(f"model zoo updated     : yes (current {best_score} > previous {prev_score})")
+            else:
+                print(f"model zoo updated     : no (kept {best_score}, previous {prev_score})")
             print(f"metrics saved to: {paths['metrics_path']}")
             print(f"summary saved to: {paths['summary_path']}")
             print(f"eval result saved to: {paths['eval_path']}")

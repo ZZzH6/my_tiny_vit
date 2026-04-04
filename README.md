@@ -12,6 +12,12 @@
 
 不包含新的模型结构，也不包含蒸馏。
 
+当前默认配方保持 DeiT-Tiny 不变，只对训练工程做标准化优化：
+
+- `RandomResizedCrop + RandAugment + RandomErasing`
+- `mixup + cutmix + label smoothing`
+- `100` epochs，`10` epochs warmup，最后 `10` 个 epoch 关闭 mixup
+
 ## 数据集目录要求
 
 当前 loader 使用 `ImageFolder` 约定，目录需要是：
@@ -50,16 +56,18 @@ python -u scripts/train.py --config configs/deit_tiny_baseline.yaml --resume res
 
 ## 测试命令
 
-命令风格和训练保持一致，只需要把 `train` 改成 `test`，再加上 checkpoint：
+命令风格和训练保持一致，只需要把 `train` 改成 `test`：
 
 ```bash
-python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --checkpoint results/checkpoints/<run_id>_best.pt --split val
+python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
 ```
 
 说明：
 
+- 默认会自动读取 `results/models/<model_name>/best.pt`
 - 默认 `split=val`
 - 也支持 `split=train`，用于做训练集评估或调试
+- 如果要指定某个历史 run，也可以额外加 `--checkpoint`
 
 ## 输出文件位置
 
@@ -70,6 +78,7 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --checkpoint 
 - `results/metrics/`
 - `results/summary/`
 - `results/eval/`
+- `results/models/`
 
 单次训练会生成：
 
@@ -91,15 +100,22 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --checkpoint 
   - 包含 `model_state`、`optimizer_state`、`scaler_state`、`current_epoch`、`best_acc`、`best_epoch`
   - 用于恢复训练
 
+- `results/models/<model_name>/best.pt`
+  - 保存该模型当前全局最优的权重
+  - 训练结束后由程序自动比较并更新
+  - 测试默认读取这个文件
+
 ## 当前 baseline 定位
 
 当前 baseline 的定位是：
 
 - 模型：`deit_tiny`
 - 数据：`Tiny-ImageNet-200`
-- 目标：形成一个工程上完整、可复现、可对比的正式 baseline
+- 目标：形成一个工程上完整、可复现、可对比、可直接进入论文表格的正式 baseline
 
 如果后续要做研究对比，建议直接基于这份 baseline 继续派生，不要在正式 baseline 上混入新的结构创新。
+
+实验发布规范见 [docs/experiment_release.md](/home/zjhao/bishe/my_tiny_vit/docs/experiment_release.md)。
 
 ## 结果文件说明
 
@@ -114,6 +130,7 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --checkpoint 
 - 配置摘要
 - `best_val_acc`
 - `best_epoch`
+- 模型级最优权重路径
 - `Params`
 - `FLOPs`
 - best / last checkpoint 路径
@@ -132,5 +149,6 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --checkpoint 
 - gradient clipping
 - early stopping
 - best / last checkpoint
+- 模型级 best checkpoint 自动同步
 
 同一配置、同一 seed 下，训练过程和数据顺序应尽量保持一致。
