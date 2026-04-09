@@ -14,7 +14,7 @@ if str(ROOT) not in sys.path:
 
 from data.build_loader import build_eval_loader, get_class_names
 from engine.evaluator import evaluate
-from models.baseline_models import build_model
+from models.baseline_models import build_model_from_cfg
 from utils.artifacts import build_run_paths, dump_csv, dump_json
 from utils.model_zoo import resolve_model_zoo_best_checkpoint
 from utils.reproducibility import seed_everything
@@ -196,14 +196,7 @@ def main():
     checkpoint = _load_checkpoint(checkpoint_path)
     _require_keys(checkpoint, ["model_state"], f"checkpoint {checkpoint_path}")
 
-    model = build_model(
-        model_name=model_cfg["name"],
-        num_classes=int(model_cfg["num_classes"]),
-        pretrained=False,
-        drop_path_rate=float(_get(cfg, "model", "drop_path_rate", default=0.1)),
-        drop_rate=float(_get(cfg, "model", "drop_rate", default=0.0)),
-        attn_drop_rate=float(_get(cfg, "model", "attn_drop_rate", default=0.0)),
-    ).to(device)
+    model = build_model_from_cfg(model_cfg, pretrained_override=False).to(device)
 
     try:
         model.load_state_dict(checkpoint["model_state"])

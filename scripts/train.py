@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 from data.build_loader import build_loader
 from engine.evaluator import evaluate
 from engine.trainer import train_one_epoch
-from models.baseline_models import build_model
+from models.baseline_models import build_model_from_cfg
 from utils.artifacts import build_model_zoo_paths, build_run_paths, dump_csv, dump_json
 from utils.model_profile import profile_model
 from utils.model_zoo import sync_model_zoo_best
@@ -472,14 +472,7 @@ def main():
             model_cfg = cfg["model"]
             data_cfg = cfg["data"]
             model_init_pretrained = bool(model_cfg["pretrained"]) and resume_checkpoint is None
-            model = build_model(
-                model_name=model_cfg["name"],
-                num_classes=int(model_cfg["num_classes"]),
-                pretrained=model_init_pretrained,
-                drop_path_rate=float(_get(cfg, "model", "drop_path_rate", default=0.1)),
-                drop_rate=float(_get(cfg, "model", "drop_rate", default=0.0)),
-                attn_drop_rate=float(_get(cfg, "model", "attn_drop_rate", default=0.0)),
-            )
+            model = build_model_from_cfg(model_cfg, pretrained_override=model_init_pretrained)
             profile = profile_model(model, input_size=(3, int(data_cfg["img_size"]), int(data_cfg["img_size"])))
             model = model.to(device)
 

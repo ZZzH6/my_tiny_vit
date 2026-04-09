@@ -16,6 +16,7 @@
 
 - 方案A：Tiny-ImageNet `64 -> 224`
 - baseline 模型：`deit_tiny_patch16_224`
+- 派生模型：`deit_tiny_convstem`（仅替换 patch embedding 为轻量 conv stem）
 - `RandomResizedCrop + RandAugment + RandomErasing`
 - `mixup(alpha=0.2) + cutmix + label smoothing`
 - `50` epochs，`5` epochs warmup
@@ -46,14 +47,22 @@ dataset/tiny-imagenet-200/
 
 ## 训练命令
 
+baseline：
+
 ```bash
 python -u scripts/train.py --config configs/deit_tiny_baseline.yaml
+```
+
+conv stem 改进模型：
+
+```bash
+python -u scripts/train.py --config configs/deit_tiny_convstem.yaml
 ```
 
 可恢复训练时增加 `--resume`：
 
 ```bash
-python -u scripts/train.py --config configs/deit_tiny_baseline.yaml --resume results/checkpoints/<run_id>_last.pt
+python -u scripts/train.py --config <config> --resume results/checkpoints/<run_id>_last.pt
 ```
 
 说明：
@@ -68,14 +77,14 @@ python -u scripts/train.py --config configs/deit_tiny_baseline.yaml --resume res
 默认会读取 `results/models/<model_name>/best.pt`，对 `val` 计算 `Top-1 / Top-5`：
 
 ```bash
-python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --split val
+python -u scripts/test.py --config <config> --split val
 ```
 
 如果你要严格复现某一次 run 的结果，应显式指定该 run 的 `*_best.pt`：
 
 ```bash
 python -u scripts/test.py \
-  --config configs/deit_tiny_baseline.yaml \
+  --config <config> \
   --checkpoint results/checkpoints/<date>/<run_id>_best.pt \
   --split val
 ```
@@ -85,14 +94,14 @@ python -u scripts/test.py \
 `test` split 没有标签，脚本不会伪造精度，而是导出预测文件：
 
 ```bash
-python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --split test
+python -u scripts/test.py --config <config> --split test
 ```
 
 也可以对某次 run 的 checkpoint 单独导出 test 预测：
 
 ```bash
 python -u scripts/test.py \
-  --config configs/deit_tiny_baseline.yaml \
+  --config <config> \
   --checkpoint results/checkpoints/<date>/<run_id>_best.pt \
   --split test
 ```
@@ -150,7 +159,13 @@ python -u scripts/test.py \
 - 目标：形成一个工程上完整、可复现、可对比、可直接进入论文表格的正式 baseline
 - 训练口径：固定 50 轮，不做额外结构改动，不为 baseline 继续无休止调参
 
-如果后续要做研究对比，建议直接基于这份 baseline 继续派生，不要在正式 baseline 上混入新的结构创新。
+当前也提供第一步结构改进版本：
+
+- 模型：`deit_tiny_convstem`
+- 改动：仅将原始 patch embedding 替换为轻量 conv stem，再接回 DeiT-Tiny 主干
+- 用途：作为后续消融与论文对比的第一步派生模型
+
+如果后续要做研究对比，建议继续基于 baseline 或 conv stem 版本逐步派生，不要在正式 baseline 上混入新的结构创新。
 
 实验发布规范见 [docs/experiment_release.md](/home/zjhao/bishe/my_tiny_vit/docs/experiment_release.md)。
 
