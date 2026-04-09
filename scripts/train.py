@@ -66,7 +66,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def _print_header(cfg, device, paths, model_zoo_paths, profile, resume_from):
+def _print_header(cfg, device, paths, model_zoo_paths, profile, resume_from, model_init_pretrained):
     model_cfg = cfg["model"]
     data_cfg = cfg["data"]
     train_cfg = cfg["train"]
@@ -83,7 +83,10 @@ def _print_header(cfg, device, paths, model_zoo_paths, profile, resume_from):
     print(f"model zoo  : {model_zoo_paths['best_checkpoint_path']}")
     print(f"eval file  : {paths['eval_path']}")
     print(f"resume from: {resume_from if resume_from is not None else 'N/A'}")
-    print(f"model      : {model_cfg['name']}  (pretrained={model_cfg['pretrained']})")
+    print(
+        f"model      : {model_cfg['name']}  "
+        f"(config_pretrained={model_cfg['pretrained']}, init_pretrained={model_init_pretrained})"
+    )
     print(f"dataset    : {data_cfg['dataset']}")
     print(f"data root  : {data_cfg['root']}")
     print(f"img size   : {data_cfg['img_size']}")
@@ -408,11 +411,22 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
     ]:
         lines.append(f"| {key} | {fmt(summary.get(key))} |")
     lines.append("")
-    lines.append("## Eval Command")
-    lines.append("```bash")
-    lines.append(summary["eval_command"])
-    lines.append("```")
-    lines.append("")
+    lines.append("## Commands")
+    for title, key in [
+        ("Train", "train_command"),
+        ("Reproduce This Run On Val", "run_val_eval_command"),
+        ("Evaluate Model-Zoo Best On Val", "model_zoo_val_eval_command"),
+        ("Run This Checkpoint On Test", "run_test_inference_command"),
+        ("Run Model-Zoo Best On Test", "model_zoo_test_inference_command"),
+    ]:
+        command = summary.get(key)
+        if not command:
+            continue
+        lines.append(f"### {title}")
+        lines.append("```bash")
+        lines.append(command)
+        lines.append("```")
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -457,10 +471,11 @@ def main():
 
             model_cfg = cfg["model"]
             data_cfg = cfg["data"]
+            model_init_pretrained = bool(model_cfg["pretrained"]) and resume_checkpoint is None
             model = build_model(
                 model_name=model_cfg["name"],
                 num_classes=int(model_cfg["num_classes"]),
-                pretrained=bool(model_cfg["pretrained"]),
+                pretrained=model_init_pretrained,
                 drop_path_rate=float(_get(cfg, "model", "drop_path_rate", default=0.1)),
                 drop_rate=float(_get(cfg, "model", "drop_rate", default=0.0)),
                 attn_drop_rate=float(_get(cfg, "model", "attn_drop_rate", default=0.0)),
@@ -503,7 +518,7 @@ def main():
                 best_epoch = int(resume_checkpoint["best_epoch"])
                 total_train_time_sec = float(resume_checkpoint["total_train_time_sec"])
 
-            _print_header(cfg, device, paths, model_zoo_paths, profile, resume_from)
+            _print_header(cfg, device, paths, model_zoo_paths, profile, resume_from, model_init_pretrained)
 
             dump_csv(paths["metrics_path"], history, METRIC_FIELDS)
 
@@ -632,6 +647,7 @@ def main():
                 "checkpoint_path": str(paths["best_checkpoint_path"]),
                 "dataset_root": str(Path(cfg["data"]["root"]).resolve()),
                 "split": "val",
+                "mode": "labeled_evaluation",
                 "top1": float(eval_metrics["top1"]),
                 "top5": float(eval_metrics["top5"]),
                 "num_samples": int(eval_metrics["num_samples"]),
@@ -716,10 +732,17 @@ def main():
                 "config_path": cfg.get("_config_path"),
                 "run_id": paths["run_id"],
                 "date_str": paths["date_str"],
-                "eval_command": f"python -u scripts/test.py --config {args.config}",
-                "eval_checkpoint_override_command": (
+                "run_val_eval_command": (
                     f"python -u scripts/test.py --config {args.config} "
                     f"--checkpoint {paths['best_checkpoint_path']} --split val"
+                ),
+                "model_zoo_val_eval_command": f"python -u scripts/test.py --config {args.config} --split val",
+                "run_test_inference_command": (
+                    f"python -u scripts/test.py --config {args.config} "
+                    f"--checkpoint {paths['best_checkpoint_path']} --split test"
+                ),
+                "model_zoo_test_inference_command": (
+                    f"python -u scripts/test.py --config {args.config} --split test"
                 ),
                 "train_command": f"python -u scripts/train.py --config {args.config}"
                 + (f" --resume {args.resume}" if args.resume else ""),

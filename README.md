@@ -33,12 +33,16 @@ dataset/tiny-imagenet-200/
   val/
     class_y/
       *.JPEG
+  test/
+    images/
+      *.JPEG
 ```
 
 注意：
 
 - `val_annotations.txt` 不会被自动转换
 - `train` 和 `val` 都必须是 `ImageFolder` 结构
+- 官方 `test` split 按 `test/images/*.JPEG` 读取，不要求标签目录
 
 ## 训练命令
 
@@ -57,19 +61,47 @@ python -u scripts/train.py --config configs/deit_tiny_baseline.yaml --resume res
 - `--resume` 必须指向 `*_last.pt`
 - `*_best.pt` 只保存最佳权重，不用于恢复优化器状态
 
-## 测试命令
+## 验证 / 测试命令
 
-命令风格和训练保持一致，只需要把 `train` 改成 `test`：
+### 1. 验证集评估
+
+默认会读取 `results/models/<model_name>/best.pt`，对 `val` 计算 `Top-1 / Top-5`：
 
 ```bash
-python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
+python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --split val
+```
+
+如果你要严格复现某一次 run 的结果，应显式指定该 run 的 `*_best.pt`：
+
+```bash
+python -u scripts/test.py \
+  --config configs/deit_tiny_baseline.yaml \
+  --checkpoint results/checkpoints/<date>/<run_id>_best.pt \
+  --split val
+```
+
+### 2. 官方 test split 推理
+
+`test` split 没有标签，脚本不会伪造精度，而是导出预测文件：
+
+```bash
+python -u scripts/test.py --config configs/deit_tiny_baseline.yaml --split test
+```
+
+也可以对某次 run 的 checkpoint 单独导出 test 预测：
+
+```bash
+python -u scripts/test.py \
+  --config configs/deit_tiny_baseline.yaml \
+  --checkpoint results/checkpoints/<date>/<run_id>_best.pt \
+  --split test
 ```
 
 说明：
 
 - 默认会自动读取 `results/models/<model_name>/best.pt`
-- 默认 `split=val`
-- 也支持 `split=train`，用于做训练集评估或调试
+- `split=train` 和 `split=val` 是有标签评估，输出 `Top-1 / Top-5`
+- `split=test` 是无标签推理，只导出预测结果，不输出精度
 - 如果要指定某个历史 run，也可以额外加 `--checkpoint`
 
 ## 输出文件位置
@@ -81,6 +113,7 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
 - `results/metrics/`
 - `results/summary/`
 - `results/eval/`
+- `results/predictions/`
 - `results/models/`
 
 单次训练会生成：
@@ -90,7 +123,7 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
 - `*_last.pt`
 - 结构化 metrics 文件
 - summary 文件
-- 训练结束后的 eval 结果文件
+- 训练结束后的 val eval 结果文件
 
 ## best / last checkpoint 区别
 
@@ -106,7 +139,7 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
 - `results/models/<model_name>/best.pt`
   - 保存该模型当前全局最优的权重
   - 训练结束后由程序自动比较并更新
-  - 测试默认读取这个文件
+  - 验证集评估和 test 推理默认读取这个文件
 
 ## 当前 baseline 定位
 
@@ -141,6 +174,7 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
 - log 路径
 - metrics 路径
 - eval 命令示例
+- test 推理命令示例
 
 ## 复现说明
 
@@ -156,3 +190,9 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
 - 模型级 best checkpoint 自动同步
 
 同一配置、同一 seed 下，训练过程和数据顺序应尽量保持一致。
+
+需要注意的实验口径：
+
+- 训练期间选 best 使用的是 `val`
+- `scripts/test.py --split val` 是验证集复评，不是独立测试集成绩
+- `scripts/test.py --split test` 用于官方 test split 推理导出

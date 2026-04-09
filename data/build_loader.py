@@ -6,13 +6,15 @@ from pathlib import Path
 import numpy as np
 import torch
 from timm.data import Mixup
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
+from torchvision.datasets.folder import default_loader
 from torchvision.transforms import InterpolationMode
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 TINY_IMAGE_SIZE = 64
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 
 
 def _get(cfg, *keys, default=None):
@@ -38,6 +40,26 @@ def _validate_imagefolder_root(path: Path, split: str) -> None:
             f"{split} directory has no class subdirectories: {path}. "
             "ImageFolder requires split/class_name/*.jpg layout, and val_annotations.txt is not auto-processed."
         )
+
+
+def _validate_test_root(path: Path) -> None:
+    if not path.exists():
+        raise FileNotFoundError(
+            f"test directory not found: {path}. Expected Tiny-ImageNet-200 official test layout at test/images."
+        )
+    if not path.is_dir():
+        raise NotADirectoryError(f"test path is not a directory: {path}")
+    image_dir = path / "images"
+    if not image_dir.exists():
+        raise FileNotFoundError(f"test images directory not found: {image_dir}")
+    if not any(p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS for p in image_dir.iterdir()):
+        raise ValueError(f"test images directory has no readable images: {image_dir}")
+
+
+def _list_train_classes(root: Path) -> list[str]:
+    train_root = root / "train"
+    _validate_imagefolder_root(train_root, "train")
+    return sorted([path.name for path in train_root.iterdir() if path.is_dir()])
 
 
 def _build_pad_resize_train_transform(cfg):
@@ -155,6 +177,27 @@ def _seed_worker(worker_id):
     np.random.seed(worker_seed)
 
 
+class TinyImageNetTestDataset(Dataset):
+    def __init__(self, image_dir: Path, transform=None):
+        self.image_dir = image_dir
+        self.transform = transform
+        self.samples = sorted(
+            [path for path in image_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS]
+        )
+        if not self.samples:
+            raise ValueError(f"No test images found in {image_dir}")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        image_path = self.samples[index]
+        image = default_loader(str(image_path))
+        if self.transform is not None:
+            image = self.transform(image)
+        return image, image_path.name
+
+
 def _build_eval_loader(cfg, split: str):
     root = Path(_get(cfg, "data", "root", default="dataset/tiny-imagenet-200"))
     batch_size = int(_get(cfg, "data", "batch_size", default=64))
@@ -170,6 +213,32 @@ def _build_eval_loader(cfg, split: str):
     dataset = datasets.ImageFolder(data_root, transform=_build_val_transform(cfg))
     generator = torch.Generator()
     generator.manual_seed(seed + (0 if split == "train" else 1))
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        worker_init_fn=_seed_worker,
+        generator=generator,
+    )
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+    loader = DataLoader(dataset, **loader_kwargs)
+    return loader, dataset
+
+
+def _build_test_loader(cfg):
+    root = Path(_get(cfg, "data", "root", default="dataset/tiny-imagenet-200"))
+    batch_size = int(_get(cfg, "data", "batch_size", default=64))
+    num_workers = int(_get(cfg, "data", "num_workers", default=4))
+    seed = int(_get(cfg, "train", "seed", default=42))
+
+    test_root = root / "test"
+    _validate_test_root(test_root)
+
+    dataset = TinyImageNetTestDataset(test_root / "images", transform=_build_val_transform(cfg))
+    generator = torch.Generator()
+    generator.manual_seed(seed + 2)
     loader_kwargs = dict(
         batch_size=batch_size,
         shuffle=False,
@@ -246,4 +315,11 @@ def build_loader(cfg):
 
 
 def build_eval_loader(cfg, split: str = "val"):
+    if split == "test":
+        return _build_test_loader(cfg)
     return _build_eval_loader(cfg, split)
+
+
+def get_class_names(cfg) -> list[str]:
+    root = Path(_get(cfg, "data", "root", default="dataset/tiny-imagenet-200"))
+    return _list_train_classes(root)
