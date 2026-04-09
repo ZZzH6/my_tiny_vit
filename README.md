@@ -14,9 +14,12 @@
 
 当前默认配方保持 DeiT-Tiny 不变，只对训练工程做标准化优化：
 
+- 方案A：Tiny-ImageNet `64 -> 224`
+- baseline 模型：`deit_tiny_patch16_224`
 - `RandomResizedCrop + RandAugment + RandomErasing`
-- `mixup + cutmix + label smoothing`
-- `100` epochs，`10` epochs warmup，最后 `10` 个 epoch 关闭 mixup
+- `mixup(alpha=0.2) + cutmix + label smoothing`
+- `50` epochs，`5` epochs warmup
+- 不启用 early stopping
 
 ## 数据集目录要求
 
@@ -112,6 +115,7 @@ python -u scripts/test.py --config configs/deit_tiny_baseline.yaml
 - 模型：`deit_tiny`
 - 数据：`Tiny-ImageNet-200`
 - 目标：形成一个工程上完整、可复现、可对比、可直接进入论文表格的正式 baseline
+- 训练口径：固定 50 轮，不做额外结构改动，不为 baseline 继续无休止调参
 
 如果后续要做研究对比，建议直接基于这份 baseline 继续派生，不要在正式 baseline 上混入新的结构创新。
 
