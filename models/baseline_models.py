@@ -5,6 +5,7 @@ from typing import Any
 import timm
 
 from models.deit_tiny_convstem import build_deit_tiny_convstem
+from models.deit_tiny_convstem_localmixer import build_deit_tiny_convstem_localmixer
 
 
 COMMON_MODEL_KEYS = {
@@ -38,6 +39,7 @@ def _build_deit_tiny(
 MODEL_BUILDERS = {
     "deit_tiny": _build_deit_tiny,
     "deit_tiny_convstem": build_deit_tiny_convstem,
+    "deit_tiny_convstem_localmixer": build_deit_tiny_convstem_localmixer,
 }
 
 

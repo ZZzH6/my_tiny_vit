@@ -17,6 +17,7 @@
 - 方案A：Tiny-ImageNet `64 -> 224`
 - baseline 模型：`deit_tiny_patch16_224`
 - 派生模型：`deit_tiny_convstem`（仅替换 patch embedding 为轻量 conv stem）
+- 第二步改进：`deit_tiny_convstem_localmixer`（conv stem + 浅层 local mixer + 深层 Transformer）
 - `RandomResizedCrop + RandAugment + RandomErasing`
 - `mixup(alpha=0.2) + cutmix + label smoothing`
 - `50` epochs，`5` epochs warmup
@@ -57,6 +58,12 @@ conv stem 改进模型：
 
 ```bash
 python -u scripts/train.py --config configs/deit_tiny_convstem.yaml
+```
+
+conv stem + local mixer 改进模型：
+
+```bash
+python -u scripts/train.py --config configs/deit_tiny_convstem_localmixer.yaml
 ```
 
 可恢复训练时增加 `--resume`：
@@ -165,7 +172,13 @@ python -u scripts/test.py \
 - 改动：仅将原始 patch embedding 替换为轻量 conv stem，再接回 DeiT-Tiny 主干
 - 用途：作为后续消融与论文对比的第一步派生模型
 
-如果后续要做研究对比，建议继续基于 baseline 或 conv stem 版本逐步派生，不要在正式 baseline 上混入新的结构创新。
+当前还提供第二步结构改进版本：
+
+- 模型：`deit_tiny_convstem_localmixer`
+- 改动：保留 conv stem，并将浅层若干个 Transformer block 的标准 MHSA 替换为局部 token mixer，深层仍保留标准 Transformer
+- 用途：让轻量化改动进一步作用到主干计算量，方便后续做消融和论文对比
+
+如果后续要做研究对比，建议继续基于 baseline、conv stem、local mixer 三条明确模型线逐步派生，不要在正式 baseline 上混入新的结构创新。
 
 实验发布规范见 [docs/experiment_release.md](/home/zjhao/bishe/my_tiny_vit/docs/experiment_release.md)。
 
