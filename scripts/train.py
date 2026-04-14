@@ -27,6 +27,7 @@ METRIC_FIELDS = [
     "epoch",
     "lr",
     "train_loss",
+    "train_acc",
     "val_acc",
     "val_top5",
     "best_acc",
@@ -320,7 +321,10 @@ def main():
             else:
                 print(f"FLOPs      : N/A ({profile['flops_note']})")
             print("-" * 80)
-            print(f"{'epoch':>5} | {'lr':>10} | {'train_loss':>10} | {'val_acc(%)':>10} | {'best_acc(%)':>10}")
+            print(
+                f"{'epoch':>5} | {'lr':>10} | {'train_loss':>10} | {'train_acc(%)':>12} | "
+                f"{'val_acc(%)':>10} | {'best_acc(%)':>10} | {'time':>8}"
+            )
             print("-" * 80)
 
             epochs = int(train_cfg["epochs"])
@@ -335,7 +339,7 @@ def main():
                     param_group["lr"] = lr_now
 
                 start_time = time.perf_counter()
-                train_loss = train_one_epoch(
+                train_metrics = train_one_epoch(
                     model,
                     train_loader,
                     optimizer,
@@ -348,6 +352,8 @@ def main():
                 epoch_time = time.perf_counter() - start_time
                 total_train_time_sec += epoch_time
 
+                train_loss = float(train_metrics["loss"])
+                train_acc = float(train_metrics["acc"])
                 val_acc = float(eval_metrics["top1"])
                 val_top5 = float(eval_metrics["top5"])
                 if val_acc > best_acc:
@@ -369,7 +375,8 @@ def main():
                     {
                         "epoch": epoch_number,
                         "lr": lr_now,
-                        "train_loss": float(train_loss),
+                        "train_loss": train_loss,
+                        "train_acc": train_acc,
                         "val_acc": val_acc,
                         "val_top5": val_top5,
                         "best_acc": best_acc,
@@ -400,7 +407,7 @@ def main():
 
                 print(
                     f"{epoch_number:5d} | {lr_now:10.6f} | {train_loss:10.4f} | "
-                    f"{val_acc:10.2f} | {best_acc:10.2f}"
+                    f"{train_acc:12.2f} | {val_acc:10.2f} | {best_acc:10.2f} | {epoch_time:8.1f}s"
                 )
 
             best_checkpoint = _load_checkpoint(Path(paths["best_checkpoint_path"]))

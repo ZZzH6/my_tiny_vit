@@ -15,6 +15,7 @@ def train_one_epoch(
     model.train()
     total_loss = 0.0
     total_samples = 0
+    total_correct = 0
     use_amp = scaler is not None and scaler.is_enabled()
 
     for images, targets in loader:
@@ -25,6 +26,9 @@ def train_one_epoch(
         with torch.cuda.amp.autocast(enabled=use_amp):
             outputs = model(images)
             loss = criterion(outputs, targets)
+
+        predictions = outputs.argmax(dim=1)
+        total_correct += (predictions == targets).sum().item()
 
         if use_amp:
             scaler.scale(loss).backward()
@@ -43,4 +47,10 @@ def train_one_epoch(
         total_loss += loss.item() * batch_size
         total_samples += batch_size
 
-    return total_loss / total_samples if total_samples > 0 else 0.0
+    if total_samples == 0:
+        return {"loss": 0.0, "acc": 0.0}
+
+    return {
+        "loss": total_loss / total_samples,
+        "acc": 100.0 * total_correct / total_samples,
+    }
