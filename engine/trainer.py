@@ -9,26 +9,25 @@ def train_one_epoch(
     optimizer,
     criterion,
     device,
+    mixup_fn=None,
     scaler=None,
     max_grad_norm=None,
 ):
     model.train()
     total_loss = 0.0
     total_samples = 0
-    total_correct = 0
     use_amp = scaler is not None and scaler.is_enabled()
 
     for images, targets in loader:
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
+        if mixup_fn is not None:
+            images, targets = mixup_fn(images, targets)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=use_amp):
             outputs = model(images)
             loss = criterion(outputs, targets)
-
-        predictions = outputs.argmax(dim=1)
-        total_correct += (predictions == targets).sum().item()
 
         if use_amp:
             scaler.scale(loss).backward()
@@ -47,10 +46,4 @@ def train_one_epoch(
         total_loss += loss.item() * batch_size
         total_samples += batch_size
 
-    if total_samples == 0:
-        return {"loss": 0.0, "acc": 0.0}
-
-    return {
-        "loss": total_loss / total_samples,
-        "acc": 100.0 * total_correct / total_samples,
-    }
+    return total_loss / total_samples if total_samples > 0 else 0.0

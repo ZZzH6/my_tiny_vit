@@ -43,7 +43,7 @@ def dump_json(path: Path, data: Any) -> Path:
 def dump_csv(path: Path, rows: Iterable[dict[str, Any]], fieldnames: list[str]) -> Path:
     ensure_parent(path)
     with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         for row in rows:
             writer.writerow(row)

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from timm.data import Mixup
 from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 from torchvision.datasets.folder import default_loader
@@ -62,20 +63,38 @@ def _build_train_transform(cfg):
         float(_get(cfg, "data", "train_crop_ratio_min", default=0.75)),
         float(_get(cfg, "data", "train_crop_ratio_max", default=1.3333333333333333)),
     )
-    return transforms.Compose(
-        [
-            transforms.RandomResizedCrop(
-                img_size,
-                scale=crop_scale,
-                ratio=crop_ratio,
+    randaugment_num_ops = int(_get(cfg, "data", "randaugment_num_ops", default=0))
+    randaugment_magnitude = int(_get(cfg, "data", "randaugment_magnitude", default=0))
+    random_erasing_prob = float(_get(cfg, "data", "random_erasing_prob", default=0.0))
+
+    ops = [
+        transforms.RandomResizedCrop(
+            img_size,
+            scale=crop_scale,
+            ratio=crop_ratio,
+            interpolation=InterpolationMode.BICUBIC,
+            antialias=True,
+        ),
+        transforms.RandomHorizontalFlip(),
+    ]
+    if randaugment_num_ops > 0 and randaugment_magnitude > 0:
+        ops.append(
+            transforms.RandAugment(
+                num_ops=randaugment_num_ops,
+                magnitude=randaugment_magnitude,
                 interpolation=InterpolationMode.BICUBIC,
-                antialias=True,
-            ),
-            transforms.RandomHorizontalFlip(),
+                fill=[int(channel * 255) for channel in IMAGENET_MEAN],
+            )
+        )
+    ops.extend(
+        [
             transforms.ToTensor(),
             transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ]
     )
+    if random_erasing_prob > 0:
+        ops.append(transforms.RandomErasing(p=random_erasing_prob, value="random"))
+    return transforms.Compose(ops)
 
 
 def _build_eval_transform(cfg):
@@ -130,6 +149,25 @@ def _build_loader_kwargs(batch_size: int, num_workers: int, seed: int, shuffle: 
     return loader_kwargs
 
 
+def _build_mixup(cfg):
+    mixup_alpha = float(_get(cfg, "train", "mixup_alpha", default=0.0))
+    cutmix_alpha = float(_get(cfg, "train", "cutmix_alpha", default=0.0))
+    if mixup_alpha <= 0.0 and cutmix_alpha <= 0.0:
+        return None
+
+    return Mixup(
+        mixup_alpha=mixup_alpha,
+        cutmix_alpha=cutmix_alpha,
+        cutmix_minmax=None,
+        prob=float(_get(cfg, "train", "mixup_prob", default=1.0)),
+        switch_prob=float(_get(cfg, "train", "mixup_switch_prob", default=0.5)),
+        mode="batch",
+        correct_lam=True,
+        label_smoothing=float(_get(cfg, "train", "label_smoothing", default=0.0)),
+        num_classes=int(_get(cfg, "model", "num_classes", default=1000)),
+    )
+
+
 def build_loader(cfg):
     root = Path(_get(cfg, "data", "root", default="dataset/tiny-imagenet-200"))
     batch_size = int(_get(cfg, "data", "batch_size", default=64))
@@ -143,17 +181,18 @@ def build_loader(cfg):
 
     train_dataset = datasets.ImageFolder(train_root, transform=_build_train_transform(cfg))
     val_dataset = datasets.ImageFolder(val_root, transform=_build_eval_transform(cfg))
+    mixup_fn = _build_mixup(cfg)
 
     train_loader = DataLoader(
         train_dataset,
-        drop_last=False,
+        drop_last=mixup_fn is not None,
         **_build_loader_kwargs(batch_size, num_workers, seed, shuffle=True),
     )
     val_loader = DataLoader(
         val_dataset,
         **_build_loader_kwargs(batch_size, num_workers, seed + 1, shuffle=False),
     )
-    return train_loader, val_loader
+    return train_loader, val_loader, mixup_fn
 
 
 def build_eval_loader(cfg, split: str = "val"):

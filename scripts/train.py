@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from timm.loss import SoftTargetCrossEntropy
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,6 @@ METRIC_FIELDS = [
     "epoch",
     "lr",
     "train_loss",
-    "train_acc",
     "val_acc",
     "val_top5",
     "best_acc",
@@ -90,6 +90,14 @@ def _epoch_lr(base_lr, epoch, total_epochs, warmup_epochs, min_lr):
     progress = min(max(progress, 0.0), 1.0)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return min_lr + (base_lr - min_lr) * cosine
+
+
+def _build_criterion(cfg, use_mixup: bool):
+    if use_mixup:
+        return SoftTargetCrossEntropy()
+    return torch.nn.CrossEntropyLoss(
+        label_smoothing=float(_get(cfg, "train", "label_smoothing", default=0.0))
+    )
 
 
 def _cpu_state_dict(model):
@@ -267,15 +275,13 @@ def main():
             )
             model = model.to(device)
 
-            train_loader, val_loader = build_loader(cfg)
+            train_loader, val_loader, mixup_fn = build_loader(cfg)
             optimizer = torch.optim.AdamW(
                 model.parameters(),
                 lr=float(train_cfg["lr"]),
                 weight_decay=float(train_cfg["weight_decay"]),
             )
-            criterion = torch.nn.CrossEntropyLoss(
-                label_smoothing=float(_get(cfg, "train", "label_smoothing", default=0.0))
-            )
+            criterion = _build_criterion(cfg, use_mixup=mixup_fn is not None)
             amp_enabled = bool(_get(cfg, "train", "amp", default=True)) and device.type == "cuda"
             scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
             max_grad_norm = float(_get(cfg, "train", "max_grad_norm", default=1.0))
@@ -322,7 +328,7 @@ def main():
                 print(f"FLOPs      : N/A ({profile['flops_note']})")
             print("-" * 80)
             print(
-                f"{'epoch':>5} | {'lr':>10} | {'train_loss':>10} | {'train_acc(%)':>12} | "
+                f"{'epoch':>5} | {'lr':>10} | {'train_loss':>10} | "
                 f"{'val_acc(%)':>10} | {'best_acc(%)':>10} | {'time':>8}"
             )
             print("-" * 80)
@@ -339,12 +345,13 @@ def main():
                     param_group["lr"] = lr_now
 
                 start_time = time.perf_counter()
-                train_metrics = train_one_epoch(
+                train_loss = train_one_epoch(
                     model,
                     train_loader,
                     optimizer,
                     criterion,
                     device,
+                    mixup_fn=mixup_fn,
                     scaler=scaler,
                     max_grad_norm=max_grad_norm,
                 )
@@ -352,8 +359,6 @@ def main():
                 epoch_time = time.perf_counter() - start_time
                 total_train_time_sec += epoch_time
 
-                train_loss = float(train_metrics["loss"])
-                train_acc = float(train_metrics["acc"])
                 val_acc = float(eval_metrics["top1"])
                 val_top5 = float(eval_metrics["top5"])
                 if val_acc > best_acc:
@@ -375,8 +380,7 @@ def main():
                     {
                         "epoch": epoch_number,
                         "lr": lr_now,
-                        "train_loss": train_loss,
-                        "train_acc": train_acc,
+                        "train_loss": float(train_loss),
                         "val_acc": val_acc,
                         "val_top5": val_top5,
                         "best_acc": best_acc,
@@ -406,8 +410,8 @@ def main():
                 _save_checkpoint(Path(paths["last_checkpoint_path"]), last_payload)
 
                 print(
-                    f"{epoch_number:5d} | {lr_now:10.6f} | {train_loss:10.4f} | "
-                    f"{train_acc:12.2f} | {val_acc:10.2f} | {best_acc:10.2f} | {epoch_time:8.1f}s"
+                    f"{epoch_number:5d} | {lr_now:10.6f} | {float(train_loss):10.4f} | "
+                    f"{val_acc:10.2f} | {best_acc:10.2f} | {epoch_time:8.1f}s"
                 )
 
             best_checkpoint = _load_checkpoint(Path(paths["best_checkpoint_path"]))
