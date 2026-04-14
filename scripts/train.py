@@ -195,7 +195,7 @@ def _build_checkpoint_payload(
 
 def _render_summary_md(summary: dict[str, Any]) -> str:
     lines = [
-        "# DeiT-Tiny Baseline Summary",
+        "# DeiT-Tiny Experiment Summary",
         "",
         "## Config",
         f"- config_path: {summary['config_path']}",
@@ -308,7 +308,7 @@ def main():
             dump_csv(Path(paths["metrics_path"]), history, METRIC_FIELDS)
 
             print("=" * 80)
-            print("Tiny-ImageNet | DeiT-Tiny baseline training")
+            print("Tiny-ImageNet | DeiT-Tiny training")
             print("=" * 80)
             print(f"config     : {cfg['_config_path']}")
             print(f"device     : {device}")
