@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,7 +12,7 @@ def build_run_paths(
     config_stem: str,
     run_id: str | None = None,
     eval_split: str = "val",
-) -> dict[str, Path]:
+) -> dict[str, Path | str]:
     if run_id is None:
         run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     date_str = run_id[:8]
@@ -27,23 +26,6 @@ def build_run_paths(
         "eval_path": results_root / "eval" / date_str / f"{config_stem}_{run_id}_{eval_split}.json",
         "best_checkpoint_path": results_root / "checkpoints" / date_str / f"{config_stem}_{run_id}_best.pt",
         "last_checkpoint_path": results_root / "checkpoints" / date_str / f"{config_stem}_{run_id}_last.pt",
-    }
-
-
-def _slugify_name(value: str) -> str:
-    value = value.strip()
-    if not value:
-        return "model"
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", value)
-
-
-def build_model_zoo_paths(results_root: Path, model_name: str) -> dict[str, Path]:
-    model_key = _slugify_name(model_name)
-    model_dir = results_root / "models" / model_key
-    return {
-        "model_dir": model_dir,
-        "best_checkpoint_path": model_dir / "best.pt",
-        "best_metadata_path": model_dir / "best.json",
     }
 
 

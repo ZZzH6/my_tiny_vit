@@ -9,7 +9,6 @@ def train_one_epoch(
     optimizer,
     criterion,
     device,
-    mixup_fn=None,
     scaler=None,
     max_grad_norm=None,
 ):
@@ -21,8 +20,6 @@ def train_one_epoch(
     for images, targets in loader:
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-        if mixup_fn is not None:
-            images, targets = mixup_fn(images, targets)
 
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=use_amp):
