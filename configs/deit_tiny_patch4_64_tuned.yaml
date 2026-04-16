@@ -1,0 +1,40 @@
+model:
+  name: deit_tiny_patch4_64
+  num_classes: 200
+  pretrained: true
+  img_size: 64
+  patch_size: 4
+  drop_path_rate: 0.0
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 64
+  batch_size: 512
+  num_workers: 8
+  train_crop_scale_min: 0.8
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.9
+  train_crop_ratio_max: 1.1111111111111112
+  randaugment_num_ops: 2
+  randaugment_magnitude: 7
+  random_erasing_prob: 0.1
+
+train:
+  seed: 42
+  deterministic: true
+  epochs: 50
+  lr: 7.5e-4
+  weight_decay: 0.05
+  label_smoothing: 0.1
+  mixup_alpha: 0.1
+  cutmix_alpha: 0.0
+  mixup_prob: 0.8
+  mixup_switch_prob: 0.0
+  warmup_epochs: 10
+  min_lr: 5.0e-6
+  max_grad_norm: 1.0
+  amp: true
+  device: cuda
