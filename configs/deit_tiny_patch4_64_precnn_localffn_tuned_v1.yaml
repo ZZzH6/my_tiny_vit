@@ -1,0 +1,48 @@
+model:
+  name: deit_tiny_patch4_64_precnn_localffn
+  num_classes: 200
+  pretrained: true
+  img_size: 64
+  patch_size: 4
+  drop_path_rate: 0.05
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  local_ffn_blocks: [8, 9, 10, 11]
+  local_ffn_kernel_size: 3
+  pre_cnn_local: true
+  pre_cnn_kernel_size: 3
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 64
+  batch_size: 512
+  num_workers: 8
+  train_crop_scale_min: 0.9
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.95
+  train_crop_ratio_max: 1.05
+
+  # 保持 strongest patch4_64 baseline 的同一训练配方，用于单变量对照。
+  randaugment_num_ops: 1
+  randaugment_magnitude: 5
+  random_erasing_prob: 0.05
+
+train:
+  seed: 42
+  deterministic: true
+  epochs: 200
+  lr: 5.0e-4
+  weight_decay: 0.05
+  label_smoothing: 0.1
+
+  mixup_alpha: 0.1
+  cutmix_alpha: 0.2
+  mixup_prob: 0.8
+  mixup_switch_prob: 0.0
+
+  warmup_epochs: 10
+  min_lr: 5.0e-6
+  max_grad_norm: 1.0
+  amp: true
+  device: cuda
