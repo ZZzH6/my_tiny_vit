@@ -58,6 +58,11 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--resume", default=None, help="Resume from a *_last.pt checkpoint.")
+    parser.add_argument(
+        "--init-checkpoint",
+        default=None,
+        help="Initialize a new run from a checkpoint without reusing the original artifacts.",
+    )
     return parser.parse_args()
 
 
@@ -90,6 +95,64 @@ def _epoch_lr(base_lr, epoch, total_epochs, warmup_epochs, min_lr):
     progress = min(max(progress, 0.0), 1.0)
     cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
     return min_lr + (base_lr - min_lr) * cosine
+
+
+def _normalize_train_stages(train_cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_stages = train_cfg.get("stages")
+    if raw_stages is None:
+        return [
+            {
+                "name": "main",
+                "epochs": int(train_cfg["epochs"]),
+                "lr": float(train_cfg["lr"]),
+                "warmup_epochs": int(train_cfg.get("warmup_epochs", 5)),
+                "min_lr": float(train_cfg.get("min_lr", 1.0e-6)),
+            }
+        ]
+
+    if not isinstance(raw_stages, list) or len(raw_stages) == 0:
+        raise ValueError("train.stages must be a non-empty list when provided.")
+
+    stages: list[dict[str, Any]] = []
+    total_epochs = 0
+    default_lr = float(train_cfg["lr"])
+    default_warmup_epochs = int(train_cfg.get("warmup_epochs", 5))
+    default_min_lr = float(train_cfg.get("min_lr", 1.0e-6))
+    for stage_idx, raw_stage in enumerate(raw_stages, start=1):
+        if not isinstance(raw_stage, dict):
+            raise ValueError(f"train.stages[{stage_idx - 1}] must be a dict.")
+
+        stage_epochs = int(raw_stage["epochs"])
+        if stage_epochs <= 0:
+            raise ValueError(f"train.stages[{stage_idx - 1}].epochs must be positive.")
+
+        stage = {
+            "name": str(raw_stage.get("name", f"stage{stage_idx}")),
+            "epochs": stage_epochs,
+            "lr": float(raw_stage.get("lr", default_lr)),
+            "warmup_epochs": int(raw_stage.get("warmup_epochs", default_warmup_epochs)),
+            "min_lr": float(raw_stage.get("min_lr", default_min_lr)),
+        }
+        stages.append(stage)
+        total_epochs += stage_epochs
+
+    configured_epochs = train_cfg.get("epochs")
+    if configured_epochs is not None and int(configured_epochs) != total_epochs:
+        raise ValueError(
+            "train.epochs must equal the sum of train.stages[*].epochs when train.stages is set."
+        )
+    return stages
+
+
+def _stage_for_epoch(train_stages: list[dict[str, Any]], epoch_idx: int) -> tuple[int, dict[str, Any], int]:
+    stage_start_epoch = 0
+    for stage_idx, stage in enumerate(train_stages, start=1):
+        stage_end_epoch = stage_start_epoch + int(stage["epochs"])
+        if epoch_idx < stage_end_epoch:
+            local_epoch_idx = epoch_idx - stage_start_epoch
+            return stage_idx, stage, local_epoch_idx
+        stage_start_epoch = stage_end_epoch
+    raise ValueError(f"Epoch index {epoch_idx} is out of range for the configured training stages.")
 
 
 def _build_criterion(cfg, use_mixup: bool):
@@ -206,6 +269,7 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
         f"- batch_size: {summary['batch_size']}",
         f"- epochs: {summary['epochs']}",
         f"- pretrained: {summary['pretrained']}",
+        f"- init_checkpoint: {summary['init_checkpoint']}",
         f"- label_smoothing: {summary['label_smoothing']}",
         "",
         "## Results",
@@ -254,8 +318,15 @@ def main():
     device_cfg = _get(cfg, "train", "device", default="cpu")
     device = torch.device("cuda" if device_cfg == "cuda" and torch.cuda.is_available() else "cpu")
 
-    resume_path = Path(args.resume).expanduser().resolve() if args.resume else None
+    resume_value = args.resume or _get(cfg, "train", "resume_from", default=None)
+    init_checkpoint_value = args.init_checkpoint or _get(cfg, "train", "init_checkpoint", default=None)
+    if resume_value and init_checkpoint_value:
+        raise ValueError("Use either resume or init_checkpoint, not both.")
+
+    resume_path = Path(resume_value).expanduser().resolve() if resume_value else None
+    init_checkpoint_path = Path(init_checkpoint_value).expanduser().resolve() if init_checkpoint_value else None
     paths, resume_checkpoint = _resolve_paths(config_path.stem, resume_path)
+    init_checkpoint = _load_checkpoint(init_checkpoint_path) if init_checkpoint_path is not None else None
     for key in ARTIFACT_KEYS:
         Path(paths[key]).parent.mkdir(parents=True, exist_ok=True)
 
@@ -266,8 +337,12 @@ def main():
             model_cfg = cfg["model"]
             data_cfg = cfg["data"]
             train_cfg = cfg["train"]
+            train_stages = _normalize_train_stages(train_cfg)
+            epochs = sum(int(stage["epochs"]) for stage in train_stages)
 
-            model_init_pretrained = bool(model_cfg["pretrained"]) and resume_checkpoint is None
+            model_init_pretrained = (
+                bool(model_cfg["pretrained"]) and resume_checkpoint is None and init_checkpoint is None
+            )
             model = build_model_from_cfg(model_cfg, pretrained_override=model_init_pretrained)
             profile = profile_model(
                 model,
@@ -278,7 +353,7 @@ def main():
             train_loader, val_loader, mixup_fn = build_loader(cfg)
             optimizer = torch.optim.AdamW(
                 model.parameters(),
-                lr=float(train_cfg["lr"]),
+                lr=float(train_stages[0]["lr"]),
                 weight_decay=float(train_cfg["weight_decay"]),
             )
             criterion = _build_criterion(cfg, use_mixup=mixup_fn is not None)
@@ -291,6 +366,9 @@ def main():
             best_acc = float("-inf")
             best_epoch = 0
             total_train_time_sec = 0.0
+
+            if init_checkpoint is not None:
+                model.load_state_dict(init_checkpoint["model_state"])
 
             if resume_checkpoint is not None:
                 model.load_state_dict(resume_checkpoint["model_state"])
@@ -316,16 +394,25 @@ def main():
             print(f"data root  : {data_cfg['root']}")
             print(f"img size   : {data_cfg['img_size']}")
             print(f"batch size : {data_cfg['batch_size']}")
-            print(f"epochs     : {train_cfg['epochs']}")
-            print(f"lr         : {train_cfg['lr']}")
+            print(f"epochs     : {epochs}")
+            print(f"lr         : {train_stages[0]['lr']}")
             print(f"wd         : {train_cfg['weight_decay']}")
             print(f"pretrained : {model_init_pretrained}")
+            print(f"init ckpt  : {init_checkpoint_path if init_checkpoint_path is not None else 'N/A'}")
             print(f"resume     : {resume_path if resume_path is not None else 'N/A'}")
             print(f"Params     : {profile['params_m']:.2f}M")
             if profile["flops_g"] is not None:
                 print(f"FLOPs      : {profile['flops_g']:.2f}G")
             else:
                 print(f"FLOPs      : N/A ({profile['flops_note']})")
+            if len(train_stages) > 1:
+                print("stages     :")
+                for stage_idx, stage in enumerate(train_stages, start=1):
+                    print(
+                        "  "
+                        f"{stage_idx}. {stage['name']} | epochs={stage['epochs']} | lr={stage['lr']} | "
+                        f"warmup={stage['warmup_epochs']} | min_lr={stage['min_lr']}"
+                    )
             print("-" * 80)
             print(
                 f"{'epoch':>5} | {'lr':>10} | {'train_loss':>10} | "
@@ -333,14 +420,25 @@ def main():
             )
             print("-" * 80)
 
-            epochs = int(train_cfg["epochs"])
-            warmup_epochs = int(_get(cfg, "train", "warmup_epochs", default=5))
-            min_lr = float(_get(cfg, "train", "min_lr", default=1.0e-6))
-            base_lr = float(train_cfg["lr"])
-
+            previous_stage_idx = None
             for epoch_idx in range(start_epoch, epochs):
                 epoch_number = epoch_idx + 1
-                lr_now = _epoch_lr(base_lr, epoch_idx, epochs, warmup_epochs, min_lr)
+                stage_idx, stage_cfg, local_epoch_idx = _stage_for_epoch(train_stages, epoch_idx)
+                if stage_idx != previous_stage_idx:
+                    print(
+                        f"enter stage {stage_idx}/{len(train_stages)}: {stage_cfg['name']} "
+                        f"(epochs={stage_cfg['epochs']}, lr={stage_cfg['lr']}, "
+                        f"warmup={stage_cfg['warmup_epochs']}, min_lr={stage_cfg['min_lr']})"
+                    )
+                    previous_stage_idx = stage_idx
+
+                lr_now = _epoch_lr(
+                    stage_cfg["lr"],
+                    local_epoch_idx,
+                    stage_cfg["epochs"],
+                    stage_cfg["warmup_epochs"],
+                    stage_cfg["min_lr"],
+                )
                 for param_group in optimizer.param_groups:
                     param_group["lr"] = lr_now
 
@@ -440,6 +538,7 @@ def main():
                 "batch_size": int(data_cfg["batch_size"]),
                 "epochs": epochs,
                 "pretrained": bool(model_cfg["pretrained"]),
+                "init_checkpoint": str(init_checkpoint_path) if init_checkpoint_path is not None else "N/A",
                 "label_smoothing": float(_get(cfg, "train", "label_smoothing", default=0.0)),
                 "best_epoch": best_epoch,
                 "best_val_acc": float(best_acc),
@@ -455,7 +554,11 @@ def main():
                 "eval_path": str(paths["eval_path"]),
                 "best_checkpoint_path": str(paths["best_checkpoint_path"]),
                 "last_checkpoint_path": str(paths["last_checkpoint_path"]),
-                "train_command": f"python -u scripts/train.py --config {args.config}",
+                "train_command": (
+                    f"python -u scripts/train.py --config {args.config}"
+                    + (f" --init-checkpoint {init_checkpoint_value}" if init_checkpoint_value else "")
+                    + (f" --resume {resume_value}" if resume_value else "")
+                ),
                 "val_eval_command": (
                     f"python -u scripts/test.py --config {args.config} "
                     f"--checkpoint {paths['best_checkpoint_path']} --split val"

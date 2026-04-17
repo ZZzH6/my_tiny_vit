@@ -141,6 +141,7 @@ def build_model(
     attn_drop_rate: float = 0.0,
     img_size: int | None = None,
     patch_size: int | None = None,
+    local_ffn: bool = False,
     local_ffn_blocks: Iterable[int] | None = None,
     local_ffn_kernel_size: int = 3,
     pre_cnn_local: bool = False,
@@ -221,7 +222,7 @@ def build_model(
         timm_name,
         **model_kwargs,
     )
-    enable_local_ffn = model_name in {
+    enable_local_ffn = bool(local_ffn) or local_ffn_blocks is not None or model_name in {
         "deit_tiny_localffn",
         "deit_tiny_patch4_64_localffn",
         "deit_tiny_patch4_64_precnn_localffn",

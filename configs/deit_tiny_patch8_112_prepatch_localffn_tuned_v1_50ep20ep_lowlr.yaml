@@ -1,0 +1,61 @@
+model:
+  name: deit_tiny_patch8_112_prepatch_localffn
+  num_classes: 200
+  pretrained: true
+  img_size: 112
+  patch_size: 8
+  drop_path_rate: 0.05
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  local_ffn_blocks: [8, 9, 10, 11]
+  local_ffn_kernel_size: 3
+  pre_patch_local: true
+  pre_patch_hidden_channels: 24
+  pre_patch_kernel_size: 3
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 112
+  batch_size: 512
+  num_workers: 8
+  train_crop_scale_min: 0.9
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.95
+  train_crop_ratio_max: 1.05
+
+  # 64 -> 112 扩展实验：保持 prepatch + localffn 的 tuned_v1 recipe，
+  # 仅改为 50 轮常规 + 20 轮低学习率收尾。
+  randaugment_num_ops: 1
+  randaugment_magnitude: 5
+  random_erasing_prob: 0.05
+
+train:
+  seed: 42
+  deterministic: true
+  epochs: 70
+  lr: 5.0e-4
+  weight_decay: 0.05
+  label_smoothing: 0.1
+
+  mixup_alpha: 0.1
+  cutmix_alpha: 0.2
+  mixup_prob: 0.8
+  mixup_switch_prob: 0.0
+
+  warmup_epochs: 10
+  min_lr: 5.0e-6
+  stages:
+    - name: main
+      epochs: 50
+      lr: 5.0e-4
+      warmup_epochs: 10
+      min_lr: 5.0e-6
+    - name: tail_lowlr
+      epochs: 20
+      lr: 5.0e-6
+      warmup_epochs: 0
+      min_lr: 5.0e-7
+  max_grad_norm: 1.0
+  amp: true
+  device: cuda
