@@ -10,6 +10,7 @@ from torch import nn
 
 from .local_ffn import LocalFFN
 from .precnn_adapter import PreCNNLocalAdapter
+from .prepatch_adapter import PrePatchLocalAdapter
 
 
 COMMON_MODEL_KEYS = {
@@ -73,16 +74,19 @@ def _apply_local_ffn_to_blocks(
     return model
 
 
-def _forward_features_with_pre_cnn_local_adapter(
+def _forward_features_with_local_adapters(
     self: nn.Module,
     x: torch.Tensor,
     attn_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if hasattr(self, "pre_patch_local_adapter"):
+        x = self.pre_patch_local_adapter(x)
     x = self.patch_embed(x)
     x = self._pos_embed(x)
     x = self.patch_drop(x)
     x = self.norm_pre(x)
-    x = self.pre_cnn_local_adapter(x)
+    if hasattr(self, "pre_cnn_local_adapter"):
+        x = self.pre_cnn_local_adapter(x)
 
     if attn_mask is not None:
         for blk in self.blocks:
@@ -107,7 +111,24 @@ def _attach_pre_cnn_local_adapter(
         grid_size=grid_size,
         kernel_size=kernel_size,
     )
-    model.forward_features = MethodType(_forward_features_with_pre_cnn_local_adapter, model)
+    model.forward_features = MethodType(_forward_features_with_local_adapters, model)
+    return model
+
+
+def _attach_pre_patch_local_adapter(
+    model: nn.Module,
+    in_chans: int = 3,
+    hidden_channels: int = 24,
+    kernel_size: int = 3,
+) -> nn.Module:
+    if hasattr(model.patch_embed, "proj") and hasattr(model.patch_embed.proj, "in_channels"):
+        in_chans = int(model.patch_embed.proj.in_channels)
+    model.pre_patch_local_adapter = PrePatchLocalAdapter(
+        in_chans=int(in_chans),
+        hidden_channels=int(hidden_channels),
+        kernel_size=kernel_size,
+    )
+    model.forward_features = MethodType(_forward_features_with_local_adapters, model)
     return model
 
 
@@ -124,6 +145,9 @@ def build_model(
     local_ffn_kernel_size: int = 3,
     pre_cnn_local: bool = False,
     pre_cnn_kernel_size: int = 3,
+    pre_patch_local: bool = False,
+    pre_patch_hidden_channels: int = 24,
+    pre_patch_kernel_size: int = 3,
     **_: Any,
 ):
     if model_name == "deit_tiny":
@@ -144,6 +168,22 @@ def build_model(
         timm_name = "deit_tiny_patch16_224"
         img_size = 64 if img_size is None else int(img_size)
         patch_size = 4 if patch_size is None else int(patch_size)
+    elif model_name == "deit_tiny_patch8_64_precnn_localffn":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 64 if img_size is None else int(img_size)
+        patch_size = 8 if patch_size is None else int(patch_size)
+    elif model_name == "deit_tiny_patch8_64_prepatch_localffn":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 64 if img_size is None else int(img_size)
+        patch_size = 8 if patch_size is None else int(patch_size)
+    elif model_name == "deit_tiny_patch8_112":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 112 if img_size is None else int(img_size)
+        patch_size = 8 if patch_size is None else int(patch_size)
+    elif model_name == "deit_tiny_patch8_112_prepatch_localffn":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 112 if img_size is None else int(img_size)
+        patch_size = 8 if patch_size is None else int(patch_size)
     else:
         raise ValueError(f"Unsupported model_name: {model_name}")
 
@@ -159,6 +199,10 @@ def build_model(
         "deit_tiny_patch4_64",
         "deit_tiny_patch4_64_localffn",
         "deit_tiny_patch4_64_precnn_localffn",
+        "deit_tiny_patch8_64_precnn_localffn",
+        "deit_tiny_patch8_64_prepatch_localffn",
+        "deit_tiny_patch8_112",
+        "deit_tiny_patch8_112_prepatch_localffn",
     } and img_size is not None:
         model_kwargs["img_size"] = int(img_size)
     if model_name in {
@@ -166,6 +210,10 @@ def build_model(
         "deit_tiny_patch4_64",
         "deit_tiny_patch4_64_localffn",
         "deit_tiny_patch4_64_precnn_localffn",
+        "deit_tiny_patch8_64_precnn_localffn",
+        "deit_tiny_patch8_64_prepatch_localffn",
+        "deit_tiny_patch8_112",
+        "deit_tiny_patch8_112_prepatch_localffn",
     } and patch_size is not None:
         model_kwargs["patch_size"] = int(patch_size)
 
@@ -177,8 +225,18 @@ def build_model(
         "deit_tiny_localffn",
         "deit_tiny_patch4_64_localffn",
         "deit_tiny_patch4_64_precnn_localffn",
+        "deit_tiny_patch8_64_precnn_localffn",
+        "deit_tiny_patch8_64_prepatch_localffn",
+        "deit_tiny_patch8_112_prepatch_localffn",
     }
-    enable_pre_cnn_local = bool(pre_cnn_local) or model_name == "deit_tiny_patch4_64_precnn_localffn"
+    enable_pre_cnn_local = bool(pre_cnn_local) or model_name in {
+        "deit_tiny_patch4_64_precnn_localffn",
+        "deit_tiny_patch8_64_precnn_localffn",
+    }
+    enable_pre_patch_local = bool(pre_patch_local) or model_name in {
+        "deit_tiny_patch8_64_prepatch_localffn",
+        "deit_tiny_patch8_112_prepatch_localffn",
+    }
 
     if enable_local_ffn or enable_pre_cnn_local:
         grid_size = _resolve_patch_grid_size(
@@ -198,6 +256,12 @@ def build_model(
             model,
             grid_size=grid_size,
             kernel_size=int(pre_cnn_kernel_size),
+        )
+    if enable_pre_patch_local:
+        _attach_pre_patch_local_adapter(
+            model,
+            hidden_channels=int(pre_patch_hidden_channels),
+            kernel_size=int(pre_patch_kernel_size),
         )
     return model
 
