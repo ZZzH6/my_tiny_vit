@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 from data.build_loader import build_loader
 from engine.evaluator import evaluate
 from engine.trainer import train_one_epoch
-from models.baseline_models import build_model_from_cfg
+from models import build_model_from_cfg
 from utils.artifacts import build_run_paths, dump_csv, dump_json
 from utils.model_profile import profile_model
 from utils.reproducibility import seed_everything

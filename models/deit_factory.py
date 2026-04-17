@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+from types import MethodType
+from typing import Any, Iterable
+
+import timm
+import torch
+from timm.models.vision_transformer import checkpoint_seq
+from torch import nn
+
+from .local_ffn import LocalFFN
+from .precnn_adapter import PreCNNLocalAdapter
+
+
+COMMON_MODEL_KEYS = {
+    "name",
+    "num_classes",
+    "pretrained",
+    "drop_path_rate",
+    "drop_rate",
+    "attn_drop_rate",
+}
+
+DEFAULT_LOCAL_FFN_BLOCKS = (8, 9, 10, 11)
+
+
+def _to_2tuple(value: int | tuple[int, int] | list[int]) -> tuple[int, int]:
+    if isinstance(value, (tuple, list)):
+        if len(value) != 2:
+            raise ValueError(f"Expected a pair of values, got: {value}")
+        return int(value[0]), int(value[1])
+    scalar = int(value)
+    return scalar, scalar
+
+
+def _normalize_block_indices(block_indices: Iterable[int] | None) -> tuple[int, ...]:
+    if block_indices is None:
+        return DEFAULT_LOCAL_FFN_BLOCKS
+    return tuple(dict.fromkeys(int(index) for index in block_indices))
+
+
+def _resolve_patch_grid_size(
+    img_size: int | tuple[int, int] | list[int],
+    patch_size: int | tuple[int, int] | list[int],
+) -> tuple[int, int]:
+    img_h, img_w = _to_2tuple(img_size)
+    patch_h, patch_w = _to_2tuple(patch_size)
+    if img_h % patch_h != 0 or img_w % patch_w != 0:
+        raise ValueError(
+            f"img_size {img_size} must be divisible by patch_size {patch_size} to form a patch grid"
+        )
+    return img_h // patch_h, img_w // patch_w
+
+
+def _apply_local_ffn_to_blocks(
+    model: nn.Module,
+    grid_size: tuple[int, int],
+    block_indices: Iterable[int] | None = None,
+    kernel_size: int = 3,
+) -> nn.Module:
+    indices = _normalize_block_indices(block_indices)
+    num_blocks = len(model.blocks)
+    for block_index in indices:
+        if block_index < 0 or block_index >= num_blocks:
+            raise ValueError(f"local_ffn block index {block_index} is out of range for {num_blocks} blocks")
+
+    # Version 1 only swaps the FFN in the last 4 blocks. This keeps the change
+    # local, limits added compute, and targets deeper tokens with stronger
+    # semantics for a clean single-variable comparison against the baseline.
+    for block_index in indices:
+        block = model.blocks[block_index]
+        block.mlp = LocalFFN(block.mlp, grid_size=grid_size, kernel_size=kernel_size)
+    return model
+
+
+def _forward_features_with_pre_cnn_local_adapter(
+    self: nn.Module,
+    x: torch.Tensor,
+    attn_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    x = self.patch_embed(x)
+    x = self._pos_embed(x)
+    x = self.patch_drop(x)
+    x = self.norm_pre(x)
+    x = self.pre_cnn_local_adapter(x)
+
+    if attn_mask is not None:
+        for blk in self.blocks:
+            x = blk(x, attn_mask=attn_mask)
+    elif self.grad_checkpointing and not torch.jit.is_scripting():
+        x = checkpoint_seq(self.blocks, x)
+    else:
+        x = self.blocks(x)
+
+    x = self.norm(x)
+    return x
+
+
+def _attach_pre_cnn_local_adapter(
+    model: nn.Module,
+    grid_size: tuple[int, int],
+    kernel_size: int = 3,
+) -> nn.Module:
+    embed_dim = int(model.embed_dim)
+    model.pre_cnn_local_adapter = PreCNNLocalAdapter(
+        embed_dim=embed_dim,
+        grid_size=grid_size,
+        kernel_size=kernel_size,
+    )
+    model.forward_features = MethodType(_forward_features_with_pre_cnn_local_adapter, model)
+    return model
+
+
+def build_model(
+    model_name: str,
+    num_classes: int,
+    pretrained: bool,
+    drop_path_rate: float = 0.0,
+    drop_rate: float = 0.0,
+    attn_drop_rate: float = 0.0,
+    img_size: int | None = None,
+    patch_size: int | None = None,
+    local_ffn_blocks: Iterable[int] | None = None,
+    local_ffn_kernel_size: int = 3,
+    pre_cnn_local: bool = False,
+    pre_cnn_kernel_size: int = 3,
+    **_: Any,
+):
+    if model_name == "deit_tiny":
+        timm_name = "deit_tiny_patch16_224"
+    elif model_name == "deit_tiny_localffn":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 224 if img_size is None else int(img_size)
+        patch_size = 16 if patch_size is None else int(patch_size)
+    elif model_name == "deit_tiny_patch4_64":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 64 if img_size is None else int(img_size)
+        patch_size = 4 if patch_size is None else int(patch_size)
+    elif model_name == "deit_tiny_patch4_64_localffn":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 64 if img_size is None else int(img_size)
+        patch_size = 4 if patch_size is None else int(patch_size)
+    elif model_name == "deit_tiny_patch4_64_precnn_localffn":
+        timm_name = "deit_tiny_patch16_224"
+        img_size = 64 if img_size is None else int(img_size)
+        patch_size = 4 if patch_size is None else int(patch_size)
+    else:
+        raise ValueError(f"Unsupported model_name: {model_name}")
+
+    model_kwargs = {
+        "pretrained": pretrained,
+        "num_classes": num_classes,
+        "drop_path_rate": drop_path_rate,
+        "drop_rate": drop_rate,
+        "attn_drop_rate": attn_drop_rate,
+    }
+    if model_name in {
+        "deit_tiny_localffn",
+        "deit_tiny_patch4_64",
+        "deit_tiny_patch4_64_localffn",
+        "deit_tiny_patch4_64_precnn_localffn",
+    } and img_size is not None:
+        model_kwargs["img_size"] = int(img_size)
+    if model_name in {
+        "deit_tiny_localffn",
+        "deit_tiny_patch4_64",
+        "deit_tiny_patch4_64_localffn",
+        "deit_tiny_patch4_64_precnn_localffn",
+    } and patch_size is not None:
+        model_kwargs["patch_size"] = int(patch_size)
+
+    model = timm.create_model(
+        timm_name,
+        **model_kwargs,
+    )
+    enable_local_ffn = model_name in {
+        "deit_tiny_localffn",
+        "deit_tiny_patch4_64_localffn",
+        "deit_tiny_patch4_64_precnn_localffn",
+    }
+    enable_pre_cnn_local = bool(pre_cnn_local) or model_name == "deit_tiny_patch4_64_precnn_localffn"
+
+    if enable_local_ffn or enable_pre_cnn_local:
+        grid_size = _resolve_patch_grid_size(
+            img_size if img_size is not None else 64,
+            patch_size if patch_size is not None else 4,
+        )
+
+    if enable_local_ffn:
+        _apply_local_ffn_to_blocks(
+            model,
+            grid_size=grid_size,
+            block_indices=local_ffn_blocks,
+            kernel_size=int(local_ffn_kernel_size),
+        )
+    if enable_pre_cnn_local:
+        _attach_pre_cnn_local_adapter(
+            model,
+            grid_size=grid_size,
+            kernel_size=int(pre_cnn_kernel_size),
+        )
+    return model
+
+
+def build_model_from_cfg(model_cfg: dict[str, Any], pretrained_override: bool | None = None):
+    pretrained = bool(model_cfg["pretrained"]) if pretrained_override is None else bool(pretrained_override)
+    extra_model_kwargs = {key: value for key, value in model_cfg.items() if key not in COMMON_MODEL_KEYS}
+    return build_model(
+        model_name=str(model_cfg["name"]),
+        num_classes=int(model_cfg["num_classes"]),
+        pretrained=pretrained,
+        drop_path_rate=float(model_cfg.get("drop_path_rate", 0.0)),
+        drop_rate=float(model_cfg.get("drop_rate", 0.0)),
+        attn_drop_rate=float(model_cfg.get("attn_drop_rate", 0.0)),
+        **extra_model_kwargs,
+    )
+
+
+__all__ = [
+    "COMMON_MODEL_KEYS",
+    "DEFAULT_LOCAL_FFN_BLOCKS",
+    "build_model",
+    "build_model_from_cfg",
+]

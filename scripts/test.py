@@ -13,7 +13,7 @@ if str(ROOT) not in sys.path:
 
 from data.build_loader import build_eval_loader, get_class_names
 from engine.evaluator import evaluate
-from models.baseline_models import build_model_from_cfg
+from models import build_model_from_cfg
 from utils.artifacts import build_run_paths, dump_csv, dump_json
 from utils.reproducibility import seed_everything
 
