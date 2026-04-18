@@ -17,6 +17,7 @@ COMMON_MODEL_KEYS = {
     "name",
     "num_classes",
     "pretrained",
+    "distilled",
     "drop_path_rate",
     "drop_rate",
     "attn_drop_rate",
@@ -132,10 +133,67 @@ def _attach_pre_patch_local_adapter(
     return model
 
 
+def _copy_matching_tensors(
+    target_state: dict[str, torch.Tensor],
+    source_state: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    updated_state = dict(target_state)
+    for key, value in source_state.items():
+        if key in updated_state and updated_state[key].shape == value.shape:
+            updated_state[key] = value
+    return updated_state
+
+
+def _initialize_distilled_model_from_base(
+    model: nn.Module,
+    base_timm_name: str,
+    base_model_kwargs: dict[str, Any],
+) -> nn.Module:
+    base_model = timm.create_model(
+        base_timm_name,
+        pretrained=True,
+        **base_model_kwargs,
+    )
+
+    model_state = _copy_matching_tensors(model.state_dict(), base_model.state_dict())
+    base_state = base_model.state_dict()
+
+    if "cls_token" in base_state and "dist_token" in model_state:
+        if model_state["dist_token"].shape == base_state["cls_token"].shape:
+            model_state["dist_token"] = base_state["cls_token"].clone()
+
+    if "pos_embed" in base_state and "pos_embed" in model_state:
+        src_pos = base_state["pos_embed"]
+        dst_pos = model_state["pos_embed"].clone()
+        if (
+            dst_pos.ndim == 3
+            and src_pos.ndim == 3
+            and dst_pos.shape[0] == src_pos.shape[0]
+            and dst_pos.shape[2] == src_pos.shape[2]
+            and dst_pos.shape[1] == src_pos.shape[1] + 1
+        ):
+            dst_pos[:, :1, :] = src_pos[:, :1, :]
+            dst_pos[:, 1:2, :] = src_pos[:, :1, :]
+            dst_pos[:, 2:, :] = src_pos[:, 1:, :]
+            model_state["pos_embed"] = dst_pos
+
+    if "head.weight" in base_state and "head_dist.weight" in model_state:
+        if model_state["head_dist.weight"].shape == base_state["head.weight"].shape:
+            model_state["head_dist.weight"] = base_state["head.weight"].clone()
+    if "head.bias" in base_state and "head_dist.bias" in model_state:
+        if model_state["head_dist.bias"].shape == base_state["head.bias"].shape:
+            model_state["head_dist.bias"] = base_state["head.bias"].clone()
+
+    model.load_state_dict(model_state)
+    model.pretrained_init_source = "base_deit_pretrained"
+    return model
+
+
 def build_model(
     model_name: str,
     num_classes: int,
     pretrained: bool,
+    distilled: bool = False,
     drop_path_rate: float = 0.0,
     drop_rate: float = 0.0,
     attn_drop_rate: float = 0.0,
@@ -149,47 +207,56 @@ def build_model(
     pre_patch_local: bool = False,
     pre_patch_hidden_channels: int = 24,
     pre_patch_kernel_size: int = 3,
-    **_: Any,
+    **timm_extra_kwargs: Any,
 ):
+    distilled = bool(distilled)
     if model_name == "deit_tiny":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
     elif model_name == "deit_tiny_localffn":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 224 if img_size is None else int(img_size)
         patch_size = 16 if patch_size is None else int(patch_size)
     elif model_name == "deit_tiny_patch4_64":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 64 if img_size is None else int(img_size)
         patch_size = 4 if patch_size is None else int(patch_size)
     elif model_name == "deit_tiny_patch4_64_localffn":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 64 if img_size is None else int(img_size)
         patch_size = 4 if patch_size is None else int(patch_size)
     elif model_name == "deit_tiny_patch4_64_precnn_localffn":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 64 if img_size is None else int(img_size)
         patch_size = 4 if patch_size is None else int(patch_size)
     elif model_name == "deit_tiny_patch8_64_precnn_localffn":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 64 if img_size is None else int(img_size)
         patch_size = 8 if patch_size is None else int(patch_size)
     elif model_name == "deit_tiny_patch8_64_prepatch_localffn":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 64 if img_size is None else int(img_size)
         patch_size = 8 if patch_size is None else int(patch_size)
     elif model_name == "deit_tiny_patch8_112":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 112 if img_size is None else int(img_size)
         patch_size = 8 if patch_size is None else int(patch_size)
     elif model_name == "deit_tiny_patch8_112_prepatch_localffn":
-        timm_name = "deit_tiny_patch16_224"
+        timm_name = "deit_tiny_distilled_patch16_224" if distilled else "deit_tiny_patch16_224"
+        base_timm_name = "deit_tiny_patch16_224"
         img_size = 112 if img_size is None else int(img_size)
         patch_size = 8 if patch_size is None else int(patch_size)
     else:
         raise ValueError(f"Unsupported model_name: {model_name}")
 
     model_kwargs = {
-        "pretrained": pretrained,
         "num_classes": num_classes,
         "drop_path_rate": drop_path_rate,
         "drop_rate": drop_rate,
@@ -217,11 +284,28 @@ def build_model(
         "deit_tiny_patch8_112_prepatch_localffn",
     } and patch_size is not None:
         model_kwargs["patch_size"] = int(patch_size)
+    # Allow student-model scaling knobs such as depth/embed_dim/num_heads/mlp_ratio
+    # to flow through from config into timm.create_model without adding a custom
+    # model implementation for each ablation.
+    model_kwargs.update(timm_extra_kwargs)
 
-    model = timm.create_model(
-        timm_name,
-        **model_kwargs,
-    )
+    if distilled and pretrained:
+        model = timm.create_model(
+            timm_name,
+            pretrained=False,
+            **model_kwargs,
+        )
+        model = _initialize_distilled_model_from_base(
+            model,
+            base_timm_name=base_timm_name,
+            base_model_kwargs=model_kwargs,
+        )
+    else:
+        model = timm.create_model(
+            timm_name,
+            pretrained=pretrained,
+            **model_kwargs,
+        )
     enable_local_ffn = bool(local_ffn) or local_ffn_blocks is not None or model_name in {
         "deit_tiny_localffn",
         "deit_tiny_patch4_64_localffn",
@@ -274,6 +358,7 @@ def build_model_from_cfg(model_cfg: dict[str, Any], pretrained_override: bool | 
         model_name=str(model_cfg["name"]),
         num_classes=int(model_cfg["num_classes"]),
         pretrained=pretrained,
+        distilled=bool(model_cfg.get("distilled", False)),
         drop_path_rate=float(model_cfg.get("drop_path_rate", 0.0)),
         drop_rate=float(model_cfg.get("drop_rate", 0.0)),
         attn_drop_rate=float(model_cfg.get("attn_drop_rate", 0.0)),

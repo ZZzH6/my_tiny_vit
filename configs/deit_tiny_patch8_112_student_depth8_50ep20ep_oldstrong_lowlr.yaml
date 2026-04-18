@@ -1,0 +1,55 @@
+model:
+  name: deit_tiny_patch8_112
+  num_classes: 200
+  pretrained: true
+  img_size: 112
+  patch_size: 8
+  depth: 8
+  drop_path_rate: 0.1
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 112
+  batch_size: 256
+  num_workers: 4
+  train_crop_scale_min: 0.6
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.75
+  train_crop_ratio_max: 1.3333333333333333
+
+  # patch8_112 student-depth8：参数与 FLOPs 均显著下降，
+  # 作为后续 KD 的主力平衡型学生模型。
+  randaugment_num_ops: 2
+  randaugment_magnitude: 9
+  random_erasing_prob: 0.25
+
+train:
+  seed: 42
+  deterministic: true
+  epochs: 70
+  lr: 5.0e-4
+  weight_decay: 0.05
+  label_smoothing: 0.1
+  mixup_alpha: 0.2
+  cutmix_alpha: 1.0
+  mixup_prob: 1.0
+  mixup_switch_prob: 0.5
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  stages:
+    - name: main_oldstrong
+      epochs: 50
+      lr: 5.0e-4
+      warmup_epochs: 5
+      min_lr: 1.0e-6
+    - name: tail_lowlr
+      epochs: 20
+      lr: 1.0e-6
+      warmup_epochs: 0
+      min_lr: 1.0e-7
+  max_grad_norm: 1.0
+  amp: true
+  device: cuda

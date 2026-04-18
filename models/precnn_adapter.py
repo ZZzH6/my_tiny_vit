@@ -53,9 +53,16 @@ class PreCNNLocalAdapter(nn.Module):
         if x.ndim != 3:
             raise ValueError(f"PreCNNLocalAdapter expects [B, N, C] tokens, got shape {tuple(x.shape)}")
 
-        cls_token, img_tokens = x[:, :1, :], x[:, 1:, :]
         grid_h, grid_w = self.grid_size
         expected_tokens = grid_h * grid_w
+        prefix_tokens = x.shape[1] - expected_tokens
+        if prefix_tokens <= 0:
+            raise ValueError(
+                f"PreCNNLocalAdapter expects at least one prefix token plus {expected_tokens} image tokens, "
+                f"got sequence length {x.shape[1]}"
+            )
+
+        prefix, img_tokens = x[:, :prefix_tokens, :], x[:, prefix_tokens:, :]
         if img_tokens.shape[1] != expected_tokens:
             raise ValueError(
                 f"PreCNNLocalAdapter expects {expected_tokens} image tokens for grid {self.grid_size}, "
@@ -73,7 +80,7 @@ class PreCNNLocalAdapter(nn.Module):
         img_tokens = img_tokens.flatten(2).transpose(1, 2)
         img_tokens = residual + img_tokens
 
-        return torch.cat((cls_token, img_tokens), dim=1)
+        return torch.cat((prefix, img_tokens), dim=1)
 
 
 __all__ = ["PreCNNLocalAdapter"]

@@ -50,9 +50,16 @@ class LocalFFN(nn.Module):
         x = self.act(x)
         x = self.drop1(x)
 
-        cls_token, img_tokens = x[:, :1, :], x[:, 1:, :]
         grid_h, grid_w = self.grid_size
         expected_tokens = grid_h * grid_w
+        prefix_tokens = x.shape[1] - expected_tokens
+        if prefix_tokens <= 0:
+            raise ValueError(
+                f"LocalFFN expects at least one prefix token plus {expected_tokens} image tokens, "
+                f"got sequence length {x.shape[1]}"
+            )
+
+        prefix, img_tokens = x[:, :prefix_tokens, :], x[:, prefix_tokens:, :]
         if img_tokens.shape[1] != expected_tokens:
             raise ValueError(
                 f"LocalFFN expects {expected_tokens} image tokens for grid {self.grid_size}, "
@@ -64,9 +71,10 @@ class LocalFFN(nn.Module):
         img_tokens = self.dwconv(img_tokens)
         img_tokens = img_tokens.flatten(2).transpose(1, 2)
 
-        # The cls token has no 2D neighborhood on the patch grid, so it bypasses
-        # depthwise convolution and is concatenated back after local mixing.
-        x = torch.cat((cls_token, img_tokens), dim=1)
+        # Prefix tokens (cls or cls+dist) have no 2D neighborhood on the patch
+        # grid, so they bypass depthwise convolution and are concatenated back
+        # after local mixing.
+        x = torch.cat((prefix, img_tokens), dim=1)
         x = self.norm(x)
         x = self.fc2(x)
         x = self.drop2(x)

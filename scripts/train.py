@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.build_loader import build_loader
+from engine.distillation import build_teacher_from_checkpoint
 from engine.evaluator import evaluate
 from engine.trainer import train_one_epoch
 from models import build_model_from_cfg
@@ -73,6 +74,7 @@ class _TeeWriter:
     def write(self, data):
         for stream in self.streams:
             stream.write(data)
+            stream.flush()
         return len(data)
 
     def flush(self):
@@ -161,6 +163,54 @@ def _build_criterion(cfg, use_mixup: bool):
     return torch.nn.CrossEntropyLoss(
         label_smoothing=float(_get(cfg, "train", "label_smoothing", default=0.0))
     )
+
+
+def _resolve_path(value: str | None, base_dir: Path) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base_dir / path
+    return path.resolve()
+
+
+def _get_distillation_cfg(cfg, base_dir: Path) -> dict[str, Any] | None:
+    raw_cfg = _get(cfg, "train", "distillation", default=None)
+    if raw_cfg is None:
+        return None
+    if not isinstance(raw_cfg, dict):
+        raise ValueError("train.distillation must be a dict when provided.")
+    if not bool(raw_cfg.get("enabled", True)):
+        return None
+
+    teacher_checkpoint_raw = raw_cfg.get("teacher_checkpoint")
+    if not teacher_checkpoint_raw:
+        raise ValueError("train.distillation.teacher_checkpoint is required when distillation is enabled.")
+
+    method = str(raw_cfg.get("method", "logit"))
+    distillation_type = str(raw_cfg.get("type", "soft"))
+    alpha = float(raw_cfg.get("alpha", 0.5))
+    temperature = float(raw_cfg.get("temperature", 4.0))
+    if method not in {"logit", "deit"}:
+        raise ValueError(f"train.distillation.method must be one of ['logit', 'deit'], got {method}")
+    if distillation_type not in {"soft", "hard"}:
+        raise ValueError(
+            f"train.distillation.type must be one of ['soft', 'hard'], got {distillation_type}"
+        )
+    if method == "logit" and distillation_type != "soft":
+        raise ValueError("train.distillation.type must be 'soft' when train.distillation.method='logit'.")
+    if alpha < 0.0 or alpha > 1.0:
+        raise ValueError(f"train.distillation.alpha must be in [0, 1], got {alpha}")
+    if distillation_type == "soft" and temperature <= 0.0:
+        raise ValueError(f"train.distillation.temperature must be positive, got {temperature}")
+
+    return {
+        "teacher_checkpoint": str(_resolve_path(str(teacher_checkpoint_raw), base_dir)),
+        "method": method,
+        "type": distillation_type,
+        "alpha": alpha,
+        "temperature": temperature,
+    }
 
 
 def _cpu_state_dict(model):
@@ -270,6 +320,12 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
         f"- epochs: {summary['epochs']}",
         f"- pretrained: {summary['pretrained']}",
         f"- init_checkpoint: {summary['init_checkpoint']}",
+        f"- distillation_enabled: {summary['distillation_enabled']}",
+        f"- distillation_method: {summary['distillation_method']}",
+        f"- distillation_type: {summary['distillation_type']}",
+        f"- teacher_checkpoint: {summary['teacher_checkpoint']}",
+        f"- distillation_alpha: {summary['distillation_alpha']}",
+        f"- distillation_temperature: {summary['distillation_temperature']}",
         f"- label_smoothing: {summary['label_smoothing']}",
         "",
         "## Results",
@@ -323,8 +379,9 @@ def main():
     if resume_value and init_checkpoint_value:
         raise ValueError("Use either resume or init_checkpoint, not both.")
 
-    resume_path = Path(resume_value).expanduser().resolve() if resume_value else None
-    init_checkpoint_path = Path(init_checkpoint_value).expanduser().resolve() if init_checkpoint_value else None
+    resume_path = _resolve_path(resume_value, ROOT)
+    init_checkpoint_path = _resolve_path(init_checkpoint_value, ROOT)
+    distillation_cfg = _get_distillation_cfg(cfg, ROOT)
     paths, resume_checkpoint = _resolve_paths(config_path.stem, resume_path)
     init_checkpoint = _load_checkpoint(init_checkpoint_path) if init_checkpoint_path is not None else None
     for key in ARTIFACT_KEYS:
@@ -349,6 +406,32 @@ def main():
                 input_size=(3, int(data_cfg["img_size"]), int(data_cfg["img_size"])),
             )
             model = model.to(device)
+            teacher_model = None
+            teacher_info = None
+            if distillation_cfg is not None:
+                teacher_model, teacher_info = build_teacher_from_checkpoint(
+                    distillation_cfg["teacher_checkpoint"],
+                    device,
+                )
+                teacher_img_size = teacher_info.get("img_size")
+                if teacher_img_size is not None and int(teacher_img_size) != int(data_cfg["img_size"]):
+                    raise ValueError(
+                        "Teacher img_size does not match student img_size: "
+                        f"{teacher_img_size} vs {data_cfg['img_size']}"
+                    )
+                teacher_num_classes = int(teacher_info.get("num_classes", -1))
+                if teacher_num_classes != int(model_cfg["num_classes"]):
+                    raise ValueError(
+                        "Teacher num_classes does not match student num_classes: "
+                        f"{teacher_num_classes} vs {model_cfg['num_classes']}"
+                    )
+                if distillation_cfg["method"] == "deit":
+                    if not hasattr(model, "set_distilled_training"):
+                        raise ValueError(
+                            "DeiT-style distillation requires a distilled student model. "
+                            "Set model.distilled: true in the config."
+                        )
+                    model.set_distilled_training(True)
 
             train_loader, val_loader, mixup_fn = build_loader(cfg)
             optimizer = torch.optim.AdamW(
@@ -405,6 +488,28 @@ def main():
                 print(f"FLOPs      : {profile['flops_g']:.2f}G")
             else:
                 print(f"FLOPs      : N/A ({profile['flops_note']})")
+            if hasattr(model, "distilled_training"):
+                print(f"student    : {'distilled' if bool(_get(cfg, 'model', 'distilled', default=False)) else 'standard'}")
+                init_source = getattr(model, "pretrained_init_source", None)
+                if init_source is not None:
+                    print(f"init source: {init_source}")
+            if teacher_info is not None:
+                print("distill    : enabled")
+                print(f"teacher    : {teacher_info['checkpoint_path']}")
+                print(
+                    f"kd method  : {distillation_cfg['method']} / {distillation_cfg['type']}"
+                )
+                print(
+                    f"kd alpha/T : {distillation_cfg['alpha']:.2f} / "
+                    f"{distillation_cfg['temperature']:.2f}"
+                )
+                if teacher_info.get("best_acc") is not None and teacher_info.get("best_epoch") is not None:
+                    print(
+                        f"teacher top1: {float(teacher_info['best_acc']):.2f}% "
+                        f"(epoch {int(teacher_info['best_epoch'])})"
+                    )
+            else:
+                print("distill    : disabled")
             if len(train_stages) > 1:
                 print("stages     :")
                 for stage_idx, stage in enumerate(train_stages, start=1):
@@ -452,6 +557,17 @@ def main():
                     mixup_fn=mixup_fn,
                     scaler=scaler,
                     max_grad_norm=max_grad_norm,
+                    teacher_model=teacher_model,
+                    distillation_alpha=0.0 if distillation_cfg is None else distillation_cfg["alpha"],
+                    distillation_temperature=1.0
+                    if distillation_cfg is None
+                    else distillation_cfg["temperature"],
+                    distillation_method="logit"
+                    if distillation_cfg is None
+                    else distillation_cfg["method"],
+                    distillation_type="soft"
+                    if distillation_cfg is None
+                    else distillation_cfg["type"],
                 )
                 eval_metrics = evaluate(model, val_loader, device)
                 epoch_time = time.perf_counter() - start_time
@@ -539,6 +655,22 @@ def main():
                 "epochs": epochs,
                 "pretrained": bool(model_cfg["pretrained"]),
                 "init_checkpoint": str(init_checkpoint_path) if init_checkpoint_path is not None else "N/A",
+                "distillation_enabled": teacher_info is not None,
+                "distillation_method": (
+                    str(distillation_cfg["method"]) if distillation_cfg is not None else "N/A"
+                ),
+                "distillation_type": (
+                    str(distillation_cfg["type"]) if distillation_cfg is not None else "N/A"
+                ),
+                "teacher_checkpoint": (
+                    teacher_info["checkpoint_path"] if teacher_info is not None else "N/A"
+                ),
+                "distillation_alpha": (
+                    float(distillation_cfg["alpha"]) if distillation_cfg is not None else 0.0
+                ),
+                "distillation_temperature": (
+                    float(distillation_cfg["temperature"]) if distillation_cfg is not None else 1.0
+                ),
                 "label_smoothing": float(_get(cfg, "train", "label_smoothing", default=0.0)),
                 "best_epoch": best_epoch,
                 "best_val_acc": float(best_acc),
