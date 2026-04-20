@@ -6,10 +6,13 @@ import math
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import torch
 from timm.loss import SoftTargetCrossEntropy
+from timm.scheduler import create_scheduler
+from timm.utils import ModelEma
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -163,6 +166,126 @@ def _build_criterion(cfg, use_mixup: bool):
     return torch.nn.CrossEntropyLoss(
         label_smoothing=float(_get(cfg, "train", "label_smoothing", default=0.0))
     )
+
+
+def _param_groups_weight_decay(model: torch.nn.Module, weight_decay: float):
+    no_weight_decay = set()
+    if hasattr(model, "no_weight_decay"):
+        no_weight_decay = set(model.no_weight_decay())
+
+    decay = []
+    no_decay = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or name.endswith(".bias") or name in no_weight_decay:
+            no_decay.append(param)
+        else:
+            decay.append(param)
+
+    param_groups: list[dict[str, Any]] = []
+    if no_decay:
+        param_groups.append({"params": no_decay, "weight_decay": 0.0})
+    if decay:
+        param_groups.append({"params": decay, "weight_decay": float(weight_decay)})
+    return param_groups
+
+
+def _scale_lr_value(train_cfg: dict[str, Any], lr_value: float, batch_size: int) -> float:
+    if not bool(train_cfg.get("scale_lr_by_batch", False)):
+        return float(lr_value)
+
+    reference_batch_size = float(train_cfg.get("lr_reference_batch_size", 512))
+    lr_scale_world_size = float(train_cfg.get("lr_scale_world_size", 1))
+    return float(lr_value) * float(batch_size) * lr_scale_world_size / reference_batch_size
+
+
+def _apply_lr_scaling_to_stages(
+    train_cfg: dict[str, Any],
+    train_stages: list[dict[str, Any]],
+    batch_size: int,
+) -> list[dict[str, Any]]:
+    if not bool(train_cfg.get("scale_lr_by_batch", False)):
+        return train_stages
+
+    scaled_stages: list[dict[str, Any]] = []
+    for stage in train_stages:
+        scaled_stage = dict(stage)
+        scaled_stage["lr"] = _scale_lr_value(train_cfg, float(stage["lr"]), batch_size)
+        scaled_stages.append(scaled_stage)
+    return scaled_stages
+
+
+def _build_optimizer(model: torch.nn.Module, train_cfg: dict[str, Any], lr: float):
+    opt_name = str(train_cfg.get("opt", "adamw")).lower()
+    weight_decay = float(train_cfg.get("weight_decay", 0.0))
+    param_groups = _param_groups_weight_decay(model, weight_decay)
+
+    if opt_name == "adamw":
+        optimizer_kwargs: dict[str, Any] = {
+            "lr": float(lr),
+            "weight_decay": 0.0,
+        }
+        opt_eps = train_cfg.get("opt_eps")
+        if opt_eps is not None:
+            optimizer_kwargs["eps"] = float(opt_eps)
+        opt_betas = train_cfg.get("opt_betas")
+        if opt_betas is not None:
+            optimizer_kwargs["betas"] = tuple(float(beta) for beta in opt_betas)
+        return torch.optim.AdamW(param_groups, **optimizer_kwargs)
+
+    if opt_name == "sgd":
+        return torch.optim.SGD(
+            param_groups,
+            lr=float(lr),
+            momentum=float(train_cfg.get("momentum", 0.9)),
+            weight_decay=0.0,
+            nesterov=bool(train_cfg.get("nesterov", False)),
+        )
+
+    raise ValueError(f"Unsupported optimizer: {opt_name}")
+
+
+def _build_timm_scheduler(train_cfg: dict[str, Any], optimizer, epochs: int):
+    decay_milestones = train_cfg.get("decay_milestones", [30, 60])
+    if decay_milestones is None:
+        decay_milestones = [30, 60]
+
+    scheduler_args = SimpleNamespace(
+        sched=str(train_cfg.get("sched", "cosine")),
+        epochs=int(epochs),
+        decay_epochs=int(train_cfg.get("decay_epochs", 30)),
+        decay_milestones=list(decay_milestones),
+        warmup_epochs=int(train_cfg.get("warmup_epochs", 5)),
+        cooldown_epochs=int(train_cfg.get("cooldown_epochs", 10)),
+        patience_epochs=int(train_cfg.get("patience_epochs", 10)),
+        decay_rate=float(train_cfg.get("decay_rate", 0.1)),
+        min_lr=float(train_cfg.get("min_lr", 1.0e-5)),
+        warmup_lr=float(train_cfg.get("warmup_lr", 1.0e-6)),
+        warmup_prefix=bool(train_cfg.get("warmup_prefix", False)),
+        lr_noise=train_cfg.get("lr_noise"),
+        lr_noise_pct=float(train_cfg.get("lr_noise_pct", 0.67)),
+        lr_noise_std=float(train_cfg.get("lr_noise_std", 1.0)),
+        seed=int(train_cfg.get("seed", 42)),
+        lr_cycle_mul=float(train_cfg.get("lr_cycle_mul", 1.0)),
+        lr_cycle_decay=float(train_cfg.get("lr_cycle_decay", 0.1)),
+        lr_cycle_limit=int(train_cfg.get("lr_cycle_limit", 1)),
+        lr_k_decay=float(train_cfg.get("lr_k_decay", 1.0)),
+        sched_on_updates=bool(train_cfg.get("sched_on_updates", False)),
+        eval_metric=str(train_cfg.get("eval_metric", "top1")),
+    )
+    lr_scheduler, _ = create_scheduler(scheduler_args, optimizer)
+    return lr_scheduler
+
+
+def _resolve_max_grad_norm(train_cfg: dict[str, Any]) -> float | None:
+    raw_value = train_cfg.get("max_grad_norm")
+    if raw_value is None:
+        return None
+    value = float(raw_value)
+    if value <= 0.0:
+        return None
+    return value
 
 
 def _resolve_path(value: str | None, base_dir: Path) -> Path | None:
@@ -394,7 +517,15 @@ def main():
             model_cfg = cfg["model"]
             data_cfg = cfg["data"]
             train_cfg = cfg["train"]
+            use_timm_scheduler = bool(train_cfg.get("use_timm_scheduler", False))
+            if use_timm_scheduler and train_cfg.get("stages") is not None:
+                raise ValueError("train.use_timm_scheduler is not supported when train.stages is set.")
             train_stages = _normalize_train_stages(train_cfg)
+            train_stages = _apply_lr_scaling_to_stages(
+                train_cfg,
+                train_stages,
+                batch_size=int(data_cfg["batch_size"]),
+            )
             epochs = sum(int(stage["epochs"]) for stage in train_stages)
 
             model_init_pretrained = (
@@ -406,6 +537,13 @@ def main():
                 input_size=(3, int(data_cfg["img_size"]), int(data_cfg["img_size"])),
             )
             model = model.to(device)
+            model_ema = None
+            if bool(train_cfg.get("model_ema", False)):
+                model_ema = ModelEma(
+                    model,
+                    decay=float(train_cfg.get("model_ema_decay", 0.99996)),
+                    device="cpu" if bool(train_cfg.get("model_ema_force_cpu", False)) else "",
+                )
             teacher_model = None
             teacher_info = None
             if distillation_cfg is not None:
@@ -434,15 +572,12 @@ def main():
                     model.set_distilled_training(True)
 
             train_loader, val_loader, mixup_fn = build_loader(cfg)
-            optimizer = torch.optim.AdamW(
-                model.parameters(),
-                lr=float(train_stages[0]["lr"]),
-                weight_decay=float(train_cfg["weight_decay"]),
-            )
+            optimizer = _build_optimizer(model, train_cfg, lr=float(train_stages[0]["lr"]))
+            lr_scheduler = _build_timm_scheduler(train_cfg, optimizer, epochs) if use_timm_scheduler else None
             criterion = _build_criterion(cfg, use_mixup=mixup_fn is not None)
             amp_enabled = bool(_get(cfg, "train", "amp", default=True)) and device.type == "cuda"
             scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
-            max_grad_norm = float(_get(cfg, "train", "max_grad_norm", default=1.0))
+            max_grad_norm = _resolve_max_grad_norm(train_cfg)
 
             history: list[dict[str, Any]] = []
             start_epoch = 0
@@ -458,6 +593,13 @@ def main():
                 if "optimizer_state" in resume_checkpoint:
                     optimizer.load_state_dict(resume_checkpoint["optimizer_state"])
                     _move_optimizer_state_to_device(optimizer, device)
+                if lr_scheduler is not None:
+                    if resume_checkpoint.get("lr_scheduler_state") is not None:
+                        lr_scheduler.load_state_dict(resume_checkpoint["lr_scheduler_state"])
+                    else:
+                        lr_scheduler.step(int(resume_checkpoint.get("current_epoch", 0)))
+                if model_ema is not None and resume_checkpoint.get("model_ema_state") is not None:
+                    model_ema.ema.load_state_dict(resume_checkpoint["model_ema_state"])
                 if "scaler_state" in resume_checkpoint:
                     scaler.load_state_dict(resume_checkpoint["scaler_state"])
                 history = list(resume_checkpoint.get("history", []))
@@ -478,7 +620,15 @@ def main():
             print(f"img size   : {data_cfg['img_size']}")
             print(f"batch size : {data_cfg['batch_size']}")
             print(f"epochs     : {epochs}")
-            print(f"lr         : {train_stages[0]['lr']}")
+            print(f"optimizer  : {str(train_cfg.get('opt', 'adamw')).lower()}")
+            if use_timm_scheduler:
+                print(f"scheduler  : {str(train_cfg.get('sched', 'cosine')).lower()} (timm)")
+                print(f"base lr    : {train_stages[0]['lr']}")
+                print(f"warmup lr  : {float(train_cfg.get('warmup_lr', 1.0e-6))}")
+            else:
+                print("scheduler  : manual cosine")
+                print(f"lr         : {train_stages[0]['lr']}")
+            print(f"model ema  : {'enabled' if model_ema is not None else 'disabled'}")
             print(f"wd         : {train_cfg['weight_decay']}")
             print(f"pretrained : {model_init_pretrained}")
             print(f"init ckpt  : {init_checkpoint_path if init_checkpoint_path is not None else 'N/A'}")
@@ -529,6 +679,8 @@ def main():
             for epoch_idx in range(start_epoch, epochs):
                 epoch_number = epoch_idx + 1
                 stage_idx, stage_cfg, local_epoch_idx = _stage_for_epoch(train_stages, epoch_idx)
+                if hasattr(train_loader.sampler, "set_epoch"):
+                    train_loader.sampler.set_epoch(epoch_idx)
                 if stage_idx != previous_stage_idx:
                     print(
                         f"enter stage {stage_idx}/{len(train_stages)}: {stage_cfg['name']} "
@@ -537,15 +689,21 @@ def main():
                     )
                     previous_stage_idx = stage_idx
 
-                lr_now = _epoch_lr(
-                    stage_cfg["lr"],
-                    local_epoch_idx,
-                    stage_cfg["epochs"],
-                    stage_cfg["warmup_epochs"],
-                    stage_cfg["min_lr"],
-                )
-                for param_group in optimizer.param_groups:
-                    param_group["lr"] = lr_now
+                if lr_scheduler is None:
+                    lr_now = _epoch_lr(
+                        stage_cfg["lr"],
+                        local_epoch_idx,
+                        stage_cfg["epochs"],
+                        stage_cfg["warmup_epochs"],
+                        stage_cfg["min_lr"],
+                    )
+                    for param_group in optimizer.param_groups:
+                        if "lr_scale" in param_group:
+                            param_group["lr"] = lr_now * float(param_group["lr_scale"])
+                        else:
+                            param_group["lr"] = lr_now
+                else:
+                    lr_now = float(optimizer.param_groups[0]["lr"])
 
                 start_time = time.perf_counter()
                 train_loss = train_one_epoch(
@@ -557,6 +715,7 @@ def main():
                     mixup_fn=mixup_fn,
                     scaler=scaler,
                     max_grad_norm=max_grad_norm,
+                    model_ema=model_ema,
                     teacher_model=teacher_model,
                     distillation_alpha=0.0 if distillation_cfg is None else distillation_cfg["alpha"],
                     distillation_temperature=1.0
@@ -572,6 +731,8 @@ def main():
                 eval_metrics = evaluate(model, val_loader, device)
                 epoch_time = time.perf_counter() - start_time
                 total_train_time_sec += epoch_time
+                if lr_scheduler is not None:
+                    lr_scheduler.step(epoch_idx)
 
                 val_acc = float(eval_metrics["top1"])
                 val_top5 = float(eval_metrics["top5"])
@@ -588,6 +749,8 @@ def main():
                         _cpu_state_dict(model),
                     )
                     best_payload["type"] = "best"
+                    if model_ema is not None:
+                        best_payload["model_ema_state"] = _cpu_state_dict(model_ema.ema)
                     _save_checkpoint(Path(paths["best_checkpoint_path"]), best_payload)
 
                 history.append(
@@ -616,6 +779,12 @@ def main():
                     {
                         "type": "last",
                         "optimizer_state": optimizer.state_dict(),
+                        "lr_scheduler_state": (
+                            lr_scheduler.state_dict() if lr_scheduler is not None else None
+                        ),
+                        "model_ema_state": (
+                            _cpu_state_dict(model_ema.ema) if model_ema is not None else None
+                        ),
                         "scaler_state": scaler.state_dict(),
                         "history": history,
                         "total_train_time_sec": float(total_train_time_sec),

@@ -14,6 +14,7 @@ def train_one_epoch(
     mixup_fn=None,
     scaler=None,
     max_grad_norm=None,
+    model_ema=None,
     teacher_model=None,
     distillation_alpha=0.0,
     distillation_temperature=1.0,
@@ -95,11 +96,15 @@ def train_one_epoch(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             scaler.step(optimizer)
             scaler.update()
+            if model_ema is not None:
+                model_ema.update(model)
         else:
             loss.backward()
             if max_grad_norm is not None and max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
+            if model_ema is not None:
+                model_ema.update(model)
 
         batch_size = images.size(0)
         total_loss += loss.item() * batch_size
