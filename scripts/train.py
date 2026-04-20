@@ -370,6 +370,24 @@ def _load_checkpoint(path: Path) -> dict[str, Any]:
     return checkpoint
 
 
+def _model_device(model: torch.nn.Module) -> torch.device:
+    try:
+        return next(model.parameters()).device
+    except StopIteration:
+        return torch.device("cpu")
+
+
+def _resolve_eval_model(
+    model: torch.nn.Module,
+    model_ema: ModelEma | None,
+) -> tuple[torch.nn.Module, torch.device, str]:
+    if model_ema is None:
+        return model, _model_device(model), "model"
+
+    ema_model = model_ema.ema
+    return ema_model, _model_device(ema_model), "ema"
+
+
 def _artifact_paths_to_str(paths: dict[str, Path | str]) -> dict[str, str]:
     return {key: str(paths[key]) for key in ARTIFACT_KEYS}
 
@@ -405,6 +423,7 @@ def _build_checkpoint_payload(
     best_acc: float,
     best_epoch: int,
     model_state,
+    model_state_source: str = "model",
 ):
     return {
         "run_id": str(paths["run_id"]),
@@ -426,6 +445,7 @@ def _build_checkpoint_payload(
         "flops_g": profile["flops_g"],
         "flops_note": profile["flops_note"],
         "model_state": model_state,
+        "model_state_source": str(model_state_source),
     }
 
 
@@ -453,6 +473,7 @@ def _render_summary_md(summary: dict[str, Any]) -> str:
         "",
         "## Results",
         f"- best_epoch: {summary['best_epoch']}",
+        f"- best_model_source: {summary['best_model_source']}",
         f"- best_val_acc: {summary['best_val_acc']:.2f}",
         f"- eval_top1: {summary['eval_top1']:.2f}",
         f"- eval_top5: {summary['eval_top5']:.2f}",
@@ -629,6 +650,7 @@ def main():
                 print("scheduler  : manual cosine")
                 print(f"lr         : {train_stages[0]['lr']}")
             print(f"model ema  : {'enabled' if model_ema is not None else 'disabled'}")
+            print(f"val model  : {'ema' if model_ema is not None else 'model'}")
             print(f"wd         : {train_cfg['weight_decay']}")
             print(f"pretrained : {model_init_pretrained}")
             print(f"init ckpt  : {init_checkpoint_path if init_checkpoint_path is not None else 'N/A'}")
@@ -728,7 +750,8 @@ def main():
                     if distillation_cfg is None
                     else distillation_cfg["type"],
                 )
-                eval_metrics = evaluate(model, val_loader, device)
+                eval_model, eval_device, eval_model_source = _resolve_eval_model(model, model_ema)
+                eval_metrics = evaluate(eval_model, val_loader, eval_device)
                 epoch_time = time.perf_counter() - start_time
                 total_train_time_sec += epoch_time
                 if lr_scheduler is not None:
@@ -746,7 +769,8 @@ def main():
                         epoch_number,
                         best_acc,
                         best_epoch,
-                        _cpu_state_dict(model),
+                        _cpu_state_dict(eval_model),
+                        model_state_source=eval_model_source,
                     )
                     best_payload["type"] = "best"
                     if model_ema is not None:
@@ -774,6 +798,7 @@ def main():
                     best_acc,
                     best_epoch,
                     _cpu_state_dict(model),
+                    model_state_source="model",
                 )
                 last_payload.update(
                     {
@@ -798,11 +823,13 @@ def main():
                 )
 
             best_checkpoint = _load_checkpoint(Path(paths["best_checkpoint_path"]))
+            best_model_source = str(best_checkpoint.get("model_state_source", "model"))
             model.load_state_dict(best_checkpoint["model_state"])
             eval_metrics = evaluate(model, val_loader, device)
             eval_result = {
                 "model_name": model_cfg["name"],
                 "checkpoint_path": str(paths["best_checkpoint_path"]),
+                "model_source": best_model_source,
                 "dataset_root": str(Path(data_cfg["root"]).resolve()),
                 "split": "val",
                 "top1": float(eval_metrics["top1"]),
@@ -842,6 +869,7 @@ def main():
                 ),
                 "label_smoothing": float(_get(cfg, "train", "label_smoothing", default=0.0)),
                 "best_epoch": best_epoch,
+                "best_model_source": best_model_source,
                 "best_val_acc": float(best_acc),
                 "eval_top1": float(eval_result["top1"]),
                 "eval_top5": float(eval_result["top5"]),
@@ -873,6 +901,7 @@ def main():
 
             print("-" * 80)
             print(f"finished. best val acc: {best_acc:.2f}% at epoch {best_epoch}")
+            print(f"best source     : {best_model_source}")
             print(f"best checkpoint : {paths['best_checkpoint_path']}")
             print(f"last checkpoint : {paths['last_checkpoint_path']}")
             print(f"metrics         : {paths['metrics_path']}")

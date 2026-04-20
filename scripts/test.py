@@ -132,6 +132,7 @@ def main():
     common_result = {
         "model_name": cfg["model"]["name"],
         "checkpoint_path": str(checkpoint_path),
+        "model_source": str(checkpoint.get("model_state_source", "model")),
         "dataset_root": str(Path(cfg["data"]["root"]).resolve()),
         "split": args.split,
         "batch_size": int(cfg["data"]["batch_size"]),
@@ -165,6 +166,7 @@ def main():
         print("Tiny-ImageNet | DeiT-Tiny test inference")
         print("=" * 80)
         print(f"checkpoint : {checkpoint_path}")
+        print(f"source     : {common_result['model_source']}")
         print(f"predictions: {predictions_path}")
         print(f"summary    : {eval_path}")
         return
@@ -184,6 +186,7 @@ def main():
     print("Tiny-ImageNet | DeiT-Tiny evaluation")
     print("=" * 80)
     print(f"checkpoint : {checkpoint_path}")
+    print(f"source     : {result['model_source']}")
     print(f"split      : {args.split}")
     print(f"top1       : {result['top1']:.2f}%")
     print(f"top5       : {result['top5']:.2f}%")

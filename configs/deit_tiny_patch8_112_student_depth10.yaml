@@ -1,0 +1,56 @@
+# 方案B：depth10 student，不蒸馏。用于先测纯减深度的精度-复杂度基线。
+model:
+  name: deit_tiny_patch8_112
+  num_classes: 200
+  pretrained: true
+  img_size: 112
+  patch_size: 8
+  depth: 10
+  drop_path_rate: 0.05
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 112
+  batch_size: 256
+  num_workers: 4
+  train_crop_scale_min: 0.6
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.75
+  train_crop_ratio_max: 1.3333333333333333
+
+  # student recipe：沿用 depth10/distill 已验证过的 light-reg 设置，
+  # 先看减深度本身的损失，再与蒸馏版本对比。
+  randaugment_num_ops: 2
+  randaugment_magnitude: 9
+  random_erasing_prob: 0.10
+
+train:
+  seed: 42
+  deterministic: true
+  epochs: 70
+  lr: 5.0e-4
+  weight_decay: 0.05
+  label_smoothing: 0.05
+  mixup_alpha: 0.2
+  cutmix_alpha: 0.5
+  mixup_prob: 1.0
+  mixup_switch_prob: 0.5
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  stages:
+    - name: main_student_lightreg
+      epochs: 50
+      lr: 5.0e-4
+      warmup_epochs: 5
+      min_lr: 1.0e-6
+    - name: tail_lowlr
+      epochs: 20
+      lr: 1.0e-6
+      warmup_epochs: 0
+      min_lr: 1.0e-7
+  max_grad_norm: 1.0
+  amp: true
+  device: cuda

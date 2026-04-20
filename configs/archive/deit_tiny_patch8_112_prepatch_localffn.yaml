@@ -1,16 +1,22 @@
-# 方案A：标准 DeiT-Tiny baseline。保留 timm 强 recipe，作为论文主锚点。
 model:
-  name: deit_tiny
+  name: deit_tiny_patch8_112_prepatch_localffn
   num_classes: 200
   pretrained: true
+  img_size: 112
+  patch_size: 8
   drop_path_rate: 0.1
   drop_rate: 0.0
   attn_drop_rate: 0.0
+  local_ffn_blocks: [8, 9, 10, 11]
+  local_ffn_kernel_size: 3
+  pre_patch_local: true
+  pre_patch_hidden_channels: 24
+  pre_patch_kernel_size: 3
 
 data:
   dataset: tiny_imagenet
   root: dataset/tiny-imagenet-200
-  img_size: 224
+  img_size: 112
   batch_size: 512
   num_workers: 8
   use_timm_create_transform: true
