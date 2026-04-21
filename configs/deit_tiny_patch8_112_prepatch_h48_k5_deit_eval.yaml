@@ -1,0 +1,69 @@
+# 方案B：先在 64 图像上做 stronger PrePatch，再在模型内部插值到 112。
+# 数据侧训练/验证都保持官方 DeiT 风格的 64 输入变换；PrePatch 先作用于 64，
+# 然后在模型内部用 bicubic 上采样到 112，再送入 patch8-112 主干。
+model:
+  name: deit_tiny_patch8_112
+  num_classes: 200
+  pretrained: true
+  img_size: 112
+  patch_size: 8
+  drop_path_rate: 0.1
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  pre_patch_local: true
+  pre_patch_hidden_channels: 48
+  pre_patch_kernel_size: 5
+  pre_patch_internal_upsample: true
+  pre_patch_interp_mode: bicubic
+  pre_patch_upsample_position: after
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 64
+  batch_size: 256
+  num_workers: 4
+  use_timm_create_transform: true
+  use_imagenet_eval: true
+  train_interpolation: bicubic
+  eval_interpolation: bicubic
+  color_jitter: 0.2
+  auto_augment: rand-m7-mstd0.5-inc1
+  train_crop_scale_min: 0.6
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.75
+  train_crop_ratio_max: 1.3333333333333333
+  random_erasing_prob: 0.15
+  random_erasing_mode: pixel
+  random_erasing_count: 1
+
+train:
+  seed: 42
+  deterministic: true
+  use_timm_scheduler: true
+  epochs: 150
+  opt: adamw
+  opt_eps: 1.0e-8
+  lr: 5.0e-4
+  scale_lr_by_batch: true
+  lr_reference_batch_size: 512
+  weight_decay: 0.05
+  label_smoothing: 0.1
+  mixup_alpha: 0.2
+  cutmix_alpha: 0.5
+  mixup_prob: 1.0
+  mixup_switch_prob: 0.5
+  sched: cosine
+  decay_epochs: 30
+  cooldown_epochs: 10
+  patience_epochs: 10
+  decay_rate: 0.1
+  warmup_epochs: 5
+  warmup_lr: 1.0e-6
+  min_lr: 1.0e-6
+  max_grad_norm: 1.0
+  model_ema: true
+  model_ema_decay: 0.99996
+  model_ema_force_cpu: false
+  amp: true
+  device: cuda

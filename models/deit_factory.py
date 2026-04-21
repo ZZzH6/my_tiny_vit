@@ -121,6 +121,9 @@ def _attach_pre_patch_local_adapter(
     in_chans: int = 3,
     hidden_channels: int = 24,
     kernel_size: int = 3,
+    output_size: tuple[int, int] | None = None,
+    interpolation_mode: str = "bicubic",
+    upsample_position: str = "before",
 ) -> nn.Module:
     if hasattr(model.patch_embed, "proj") and hasattr(model.patch_embed.proj, "in_channels"):
         in_chans = int(model.patch_embed.proj.in_channels)
@@ -128,6 +131,9 @@ def _attach_pre_patch_local_adapter(
         in_chans=int(in_chans),
         hidden_channels=int(hidden_channels),
         kernel_size=kernel_size,
+        output_size=output_size,
+        interpolation_mode=interpolation_mode,
+        upsample_position=str(upsample_position),
     )
     model.forward_features = MethodType(_forward_features_with_local_adapters, model)
     return model
@@ -207,6 +213,9 @@ def build_model(
     pre_patch_local: bool = False,
     pre_patch_hidden_channels: int = 24,
     pre_patch_kernel_size: int = 3,
+    pre_patch_internal_upsample: bool = False,
+    pre_patch_interp_mode: str = "bicubic",
+    pre_patch_upsample_position: str = "before",
     **timm_extra_kwargs: Any,
 ):
     distilled = bool(distilled)
@@ -343,10 +352,14 @@ def build_model(
             kernel_size=int(pre_cnn_kernel_size),
         )
     if enable_pre_patch_local:
+        pre_patch_output_size = _to_2tuple(img_size) if bool(pre_patch_internal_upsample) and img_size is not None else None
         _attach_pre_patch_local_adapter(
             model,
             hidden_channels=int(pre_patch_hidden_channels),
             kernel_size=int(pre_patch_kernel_size),
+            output_size=pre_patch_output_size,
+            interpolation_mode=str(pre_patch_interp_mode),
+            upsample_position=str(pre_patch_upsample_position),
         )
     return model
 
