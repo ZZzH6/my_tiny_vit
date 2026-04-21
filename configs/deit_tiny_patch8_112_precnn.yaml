@@ -1,5 +1,5 @@
-# 方案B：64 -> 112, patch8 baseline。用于验证从 224 强 recipe 适度减弱后，
-# 在 112 主线上不加模块时能达到的基线水平。
+# 方案B：64 -> 112, patch8 + PreCNN token interaction。
+# 训练 recipe 与 deit_tiny_patch8_112_baseline 保持一致，只保留模块变量。
 model:
   name: deit_tiny_patch8_112
   num_classes: 200
@@ -9,6 +9,8 @@ model:
   drop_path_rate: 0.1
   drop_rate: 0.0
   attn_drop_rate: 0.0
+  pre_cnn_local: true
+  pre_cnn_kernel_size: 3
 
 data:
   dataset: tiny_imagenet

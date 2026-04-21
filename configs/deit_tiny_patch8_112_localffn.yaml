@@ -1,4 +1,5 @@
-# 方案B：64 -> 112, patch8 + local FFN。当前主线 teacher 候选。
+# 方案B：64 -> 112, patch8 + LocalFFN。
+# 训练 recipe 与 deit_tiny_patch8_112_baseline 保持一致，只保留模块变量。
 model:
   name: deit_tiny_patch8_112
   num_classes: 200
@@ -18,41 +19,47 @@ data:
   img_size: 112
   batch_size: 256
   num_workers: 4
+  use_timm_create_transform: true
+  use_imagenet_eval: false
+  train_interpolation: bicubic
+  eval_interpolation: bicubic
+  color_jitter: 0.2
+  auto_augment: rand-m7-mstd0.5-inc1
   train_crop_scale_min: 0.6
   train_crop_scale_max: 1.0
   train_crop_ratio_min: 0.75
   train_crop_ratio_max: 1.3333333333333333
-
-  # patch8_112 localffn teacher：与 112 baseline 共享同一套 teacher recipe，
-  # 只比较结构本身的增益。
-  randaugment_num_ops: 2
-  randaugment_magnitude: 9
-  random_erasing_prob: 0.25
+  random_erasing_prob: 0.15
+  random_erasing_mode: pixel
+  random_erasing_count: 1
 
 train:
   seed: 42
   deterministic: true
-  epochs: 70
+  use_timm_scheduler: true
+  epochs: 150
+  opt: adamw
+  opt_eps: 1.0e-8
   lr: 5.0e-4
+  scale_lr_by_batch: true
+  lr_reference_batch_size: 512
   weight_decay: 0.05
   label_smoothing: 0.1
   mixup_alpha: 0.2
-  cutmix_alpha: 1.0
+  cutmix_alpha: 0.5
   mixup_prob: 1.0
   mixup_switch_prob: 0.5
+  sched: cosine
+  decay_epochs: 30
+  cooldown_epochs: 10
+  patience_epochs: 10
+  decay_rate: 0.1
   warmup_epochs: 5
+  warmup_lr: 1.0e-6
   min_lr: 1.0e-6
-  stages:
-    - name: main_teacher
-      epochs: 50
-      lr: 5.0e-4
-      warmup_epochs: 5
-      min_lr: 1.0e-6
-    - name: tail_lowlr
-      epochs: 20
-      lr: 1.0e-6
-      warmup_epochs: 0
-      min_lr: 1.0e-7
   max_grad_norm: 1.0
+  model_ema: true
+  model_ema_decay: 0.99996
+  model_ema_force_cpu: false
   amp: true
   device: cuda
