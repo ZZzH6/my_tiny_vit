@@ -1,0 +1,72 @@
+# 方案B teacher 冲刺版：从 strong teacher best checkpoint 出发做低正则尾训，
+# 不再引入递归蒸馏，也不改主结构，目标是把已提升的排序能力进一步转成 top-1。
+#
+# 设计动机：
+# 1. overlap_patch12_strong_teacher 的 top-5 已到 94.09，说明类别排序比原始 overlap 更好；
+# 2. 当前 top-1 只差 80% 还差 0.23，适合用短周期低学习率、弱增强尾训做最后一冲；
+# 3. 该方案不改变后续蒸馏主线，只是对当前最强非蒸馏 teacher 做一次收尾抛光。
+model:
+  name: deit_tiny_patch8_112
+  num_classes: 200
+  pretrained: false
+  img_size: 112
+  patch_size: 8
+  drop_path_rate: 0.1
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+  overlap_patch_embed: true
+  overlap_patch_kernel_size: 12
+  overlap_patch_interpolation: bicubic
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 112
+  batch_size: 256
+  num_workers: 4
+  use_timm_create_transform: true
+  use_imagenet_eval: false
+  repeated_aug: false
+  train_interpolation: bicubic
+  eval_interpolation: bicubic
+  color_jitter: 0.1
+  auto_augment: null
+  train_crop_scale_min: 0.9
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.95
+  train_crop_ratio_max: 1.05
+  random_erasing_prob: 0.0
+  random_erasing_mode: pixel
+  random_erasing_count: 1
+
+train:
+  seed: 42
+  deterministic: true
+  use_timm_scheduler: true
+  epochs: 20
+  opt: adamw
+  opt_eps: 1.0e-8
+  lr: 2.0e-5
+  scale_lr_by_batch: false
+  lr_reference_batch_size: 512
+  weight_decay: 0.05
+  label_smoothing: 0.0
+  mixup_alpha: 0.0
+  cutmix_alpha: 0.0
+  mixup_prob: 0.0
+  mixup_switch_prob: 0.0
+  sched: cosine
+  decay_epochs: 30
+  cooldown_epochs: 0
+  patience_epochs: 10
+  decay_rate: 0.1
+  warmup_epochs: 0
+  warmup_lr: 1.0e-6
+  min_lr: 1.0e-6
+  max_grad_norm: null
+  model_ema: true
+  model_ema_decay: 0.99996
+  model_ema_force_cpu: false
+  amp: true
+  device: cuda
+  init_checkpoint: results/checkpoints/20260422/deit_tiny_patch8_112_overlap_patch12_strong_teacher_20260422_125604_best.pt

@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 import timm
 import torch
+from timm.layers.patch_embed import resample_patch_embed
 from timm.models.vision_transformer import checkpoint_seq
 from torch import nn
 
@@ -139,6 +140,72 @@ def _attach_pre_patch_local_adapter(
     return model
 
 
+def _attach_overlap_patch_embed(
+    model: nn.Module,
+    kernel_size: int,
+    interpolation: str = "bicubic",
+) -> nn.Module:
+    if not hasattr(model, "patch_embed") or not hasattr(model.patch_embed, "proj"):
+        raise ValueError("Overlap patch embedding requires model.patch_embed.proj to exist.")
+
+    proj = model.patch_embed.proj
+    if not isinstance(proj, nn.Conv2d):
+        raise ValueError("Overlap patch embedding currently only supports Conv2d patch projections.")
+
+    stride_h, stride_w = int(proj.stride[0]), int(proj.stride[1])
+    kernel_size = int(kernel_size)
+    if kernel_size < stride_h or kernel_size < stride_w:
+        raise ValueError(
+            "overlap_patch_kernel_size must be >= patch stride. "
+            f"Got kernel_size={kernel_size}, stride={proj.stride}."
+        )
+    if (kernel_size - stride_h) % 2 != 0 or (kernel_size - stride_w) % 2 != 0:
+        raise ValueError(
+            "overlap_patch_kernel_size - patch stride must be even so the patch grid stays unchanged. "
+            f"Got kernel_size={kernel_size}, stride={proj.stride}."
+        )
+
+    padding_h = (kernel_size - stride_h) // 2
+    padding_w = (kernel_size - stride_w) // 2
+
+    img_h, img_w = model.patch_embed.img_size
+    out_h = ((img_h + 2 * padding_h - kernel_size) // stride_h) + 1
+    out_w = ((img_w + 2 * padding_w - kernel_size) // stride_w) + 1
+    expected_h, expected_w = model.patch_embed.grid_size
+    if (out_h, out_w) != (expected_h, expected_w):
+        raise ValueError(
+            "Overlap patch embedding changed patch grid size unexpectedly: "
+            f"expected {(expected_h, expected_w)}, got {(out_h, out_w)}."
+        )
+
+    new_proj = nn.Conv2d(
+        in_channels=int(proj.in_channels),
+        out_channels=int(proj.out_channels),
+        kernel_size=(kernel_size, kernel_size),
+        stride=proj.stride,
+        padding=(padding_h, padding_w),
+        dilation=proj.dilation,
+        groups=proj.groups,
+        bias=proj.bias is not None,
+        device=proj.weight.device,
+        dtype=proj.weight.dtype,
+    )
+    with torch.no_grad():
+        new_proj.weight.copy_(
+            resample_patch_embed(
+                proj.weight.detach(),
+                [kernel_size, kernel_size],
+                interpolation=str(interpolation),
+            )
+        )
+        if proj.bias is not None and new_proj.bias is not None:
+            new_proj.bias.copy_(proj.bias.detach())
+
+    model.patch_embed.proj = new_proj
+    model.patch_embed.overlap_kernel_size = (kernel_size, kernel_size)
+    return model
+
+
 def _copy_matching_tensors(
     target_state: dict[str, torch.Tensor],
     source_state: dict[str, torch.Tensor],
@@ -216,6 +283,9 @@ def build_model(
     pre_patch_internal_upsample: bool = False,
     pre_patch_interp_mode: str = "bicubic",
     pre_patch_upsample_position: str = "before",
+    overlap_patch_embed: bool = False,
+    overlap_patch_kernel_size: int | None = None,
+    overlap_patch_interpolation: str = "bicubic",
     **timm_extra_kwargs: Any,
 ):
     distilled = bool(distilled)
@@ -314,6 +384,16 @@ def build_model(
             timm_name,
             pretrained=pretrained,
             **model_kwargs,
+        )
+    if bool(overlap_patch_embed) or overlap_patch_kernel_size is not None:
+        _attach_overlap_patch_embed(
+            model,
+            kernel_size=(
+                int(overlap_patch_kernel_size)
+                if overlap_patch_kernel_size is not None
+                else int(model.patch_embed.patch_size[0])
+            ),
+            interpolation=str(overlap_patch_interpolation),
         )
     enable_local_ffn = bool(local_ffn) or local_ffn_blocks is not None or model_name in {
         "deit_tiny_localffn",

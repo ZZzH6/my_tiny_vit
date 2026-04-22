@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import contextlib
 import math
 import sys
@@ -85,15 +86,18 @@ class _TeeWriter:
             stream.flush()
 
 
-def _epoch_lr(base_lr, epoch, total_epochs, warmup_epochs, min_lr):
+def _epoch_lr(base_lr, epoch, total_epochs, warmup_epochs, min_lr, warmup_lr=None):
     total_epochs = max(1, int(total_epochs))
     warmup_epochs = max(0, min(int(warmup_epochs), total_epochs - 1))
     base_lr = float(base_lr)
     min_lr = float(min_lr)
+    if warmup_lr is None:
+        warmup_lr = base_lr * 0.1
+    warmup_lr = float(warmup_lr)
 
     if warmup_epochs > 0 and epoch < warmup_epochs:
         progress = epoch / max(1, warmup_epochs)
-        return base_lr * (0.1 + 0.9 * progress)
+        return warmup_lr + (base_lr - warmup_lr) * progress
 
     cosine_epochs = max(1, total_epochs - warmup_epochs)
     progress = (epoch - warmup_epochs) / max(1, cosine_epochs - 1)
@@ -111,6 +115,7 @@ def _normalize_train_stages(train_cfg: dict[str, Any]) -> list[dict[str, Any]]:
                 "epochs": int(train_cfg["epochs"]),
                 "lr": float(train_cfg["lr"]),
                 "warmup_epochs": int(train_cfg.get("warmup_epochs", 5)),
+                "warmup_lr": float(train_cfg.get("warmup_lr", 1.0e-6)),
                 "min_lr": float(train_cfg.get("min_lr", 1.0e-6)),
             }
         ]
@@ -136,8 +141,21 @@ def _normalize_train_stages(train_cfg: dict[str, Any]) -> list[dict[str, Any]]:
             "epochs": stage_epochs,
             "lr": float(raw_stage.get("lr", default_lr)),
             "warmup_epochs": int(raw_stage.get("warmup_epochs", default_warmup_epochs)),
+            "warmup_lr": float(raw_stage.get("warmup_lr", train_cfg.get("warmup_lr", 1.0e-6))),
             "min_lr": float(raw_stage.get("min_lr", default_min_lr)),
         }
+        data_overrides = raw_stage.get("data_overrides")
+        if data_overrides is not None:
+            if not isinstance(data_overrides, dict):
+                raise ValueError(f"train.stages[{stage_idx - 1}].data_overrides must be a dict.")
+            stage["data_overrides"] = copy.deepcopy(data_overrides)
+
+        train_overrides = raw_stage.get("train_overrides")
+        if train_overrides is not None:
+            if not isinstance(train_overrides, dict):
+                raise ValueError(f"train.stages[{stage_idx - 1}].train_overrides must be a dict.")
+            stage["train_overrides"] = copy.deepcopy(train_overrides)
+
         stages.append(stage)
         total_epochs += stage_epochs
 
@@ -166,6 +184,29 @@ def _build_criterion(cfg, use_mixup: bool):
     return torch.nn.CrossEntropyLoss(
         label_smoothing=float(_get(cfg, "train", "label_smoothing", default=0.0))
     )
+
+
+def _deep_merge_dict(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _build_stage_runtime_cfg(cfg: dict[str, Any], stage_cfg: dict[str, Any]) -> dict[str, Any]:
+    stage_runtime_cfg = copy.deepcopy(cfg)
+    data_overrides = stage_cfg.get("data_overrides")
+    if data_overrides is not None:
+        stage_runtime_cfg["data"] = _deep_merge_dict(stage_runtime_cfg["data"], data_overrides)
+
+    train_overrides = stage_cfg.get("train_overrides")
+    if train_overrides is not None:
+        stage_runtime_cfg["train"] = _deep_merge_dict(stage_runtime_cfg["train"], train_overrides)
+
+    return stage_runtime_cfg
 
 
 def _param_groups_weight_decay(model: torch.nn.Module, weight_decay: float):
@@ -592,13 +633,14 @@ def main():
                         )
                     model.set_distilled_training(True)
 
-            train_loader, val_loader, mixup_fn = build_loader(cfg)
+            runtime_cfg = _build_stage_runtime_cfg(cfg, train_stages[0])
+            train_loader, val_loader, mixup_fn = build_loader(runtime_cfg)
             optimizer = _build_optimizer(model, train_cfg, lr=float(train_stages[0]["lr"]))
             lr_scheduler = _build_timm_scheduler(train_cfg, optimizer, epochs) if use_timm_scheduler else None
-            criterion = _build_criterion(cfg, use_mixup=mixup_fn is not None)
+            criterion = _build_criterion(runtime_cfg, use_mixup=mixup_fn is not None)
             amp_enabled = bool(_get(cfg, "train", "amp", default=True)) and device.type == "cuda"
             scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
-            max_grad_norm = _resolve_max_grad_norm(train_cfg)
+            max_grad_norm = _resolve_max_grad_norm(runtime_cfg["train"])
 
             history: list[dict[str, Any]] = []
             start_epoch = 0
@@ -608,6 +650,15 @@ def main():
 
             if init_checkpoint is not None:
                 model.load_state_dict(init_checkpoint["model_state"])
+                if model_ema is not None:
+                    init_ema_state = init_checkpoint.get("model_ema_state")
+                    if init_ema_state is not None:
+                        model_ema.ema.load_state_dict(init_ema_state)
+                    else:
+                        # Keep EMA aligned with the initialized weights. Without
+                        # this, finetuning from an init checkpoint while
+                        # evaluating EMA starts from a random EMA model.
+                        model_ema.ema.load_state_dict(init_checkpoint["model_state"])
 
             if resume_checkpoint is not None:
                 model.load_state_dict(resume_checkpoint["model_state"])
@@ -648,7 +699,8 @@ def main():
                 print(f"warmup lr  : {float(train_cfg.get('warmup_lr', 1.0e-6))}")
             else:
                 print("scheduler  : manual cosine")
-                print(f"lr         : {train_stages[0]['lr']}")
+                print(f"base lr    : {train_stages[0]['lr']}")
+                print(f"warmup lr  : {train_stages[0]['warmup_lr']}")
             print(f"model ema  : {'enabled' if model_ema is not None else 'disabled'}")
             print(f"val model  : {'ema' if model_ema is not None else 'model'}")
             print(f"wd         : {train_cfg['weight_decay']}")
@@ -688,7 +740,8 @@ def main():
                     print(
                         "  "
                         f"{stage_idx}. {stage['name']} | epochs={stage['epochs']} | lr={stage['lr']} | "
-                        f"warmup={stage['warmup_epochs']} | min_lr={stage['min_lr']}"
+                        f"warmup={stage['warmup_epochs']} | warmup_lr={stage['warmup_lr']} | "
+                        f"min_lr={stage['min_lr']}"
                     )
             print("-" * 80)
             print(
@@ -704,10 +757,15 @@ def main():
                 if hasattr(train_loader.sampler, "set_epoch"):
                     train_loader.sampler.set_epoch(epoch_idx)
                 if stage_idx != previous_stage_idx:
+                    runtime_cfg = _build_stage_runtime_cfg(cfg, stage_cfg)
+                    train_loader, val_loader, mixup_fn = build_loader(runtime_cfg)
+                    criterion = _build_criterion(runtime_cfg, use_mixup=mixup_fn is not None)
+                    max_grad_norm = _resolve_max_grad_norm(runtime_cfg["train"])
                     print(
                         f"enter stage {stage_idx}/{len(train_stages)}: {stage_cfg['name']} "
                         f"(epochs={stage_cfg['epochs']}, lr={stage_cfg['lr']}, "
-                        f"warmup={stage_cfg['warmup_epochs']}, min_lr={stage_cfg['min_lr']})"
+                        f"warmup={stage_cfg['warmup_epochs']}, warmup_lr={stage_cfg['warmup_lr']}, "
+                        f"min_lr={stage_cfg['min_lr']})"
                     )
                     previous_stage_idx = stage_idx
 
@@ -718,6 +776,7 @@ def main():
                         stage_cfg["epochs"],
                         stage_cfg["warmup_epochs"],
                         stage_cfg["min_lr"],
+                        stage_cfg["warmup_lr"],
                     )
                     for param_group in optimizer.param_groups:
                         if "lr_scale" in param_group:
