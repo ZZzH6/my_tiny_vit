@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import random
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -52,6 +54,18 @@ def _seed_worker(worker_id):
     worker_seed = torch.initial_seed() % 2**32
     random.seed(worker_seed)
     np.random.seed(worker_seed)
+
+
+def _init_worker(
+    worker_id: int,
+    parent_affinity: tuple[int, ...] | None = None,
+):
+    # Re-apply the parent's CPU affinity in the worker. On this workstation,
+    # some full training runs end up with workers narrowed to two logical CPUs
+    # despite the parent process having a wider mask, which starves GPU input.
+    if parent_affinity:
+        os.sched_setaffinity(0, parent_affinity)
+    _seed_worker(worker_id)
 
 
 def _resolve_interpolation(name: str) -> InterpolationMode:
@@ -190,20 +204,33 @@ class TinyImageNetTestDataset(Dataset):
         return image, image_path.name
 
 
-def _build_loader_kwargs(batch_size: int, num_workers: int, seed: int, shuffle: bool | None):
+def _build_loader_kwargs(
+    cfg,
+    batch_size: int,
+    num_workers: int,
+    seed: int,
+    shuffle: bool | None,
+):
     generator = torch.Generator()
     generator.manual_seed(seed)
+    parent_affinity: tuple[int, ...] | None = None
+    if num_workers > 0 and bool(_get(cfg, "data", "inherit_parent_affinity", default=False)):
+        parent_affinity = tuple(sorted(os.sched_getaffinity(0)))
+
     loader_kwargs = {
         "batch_size": batch_size,
         "num_workers": num_workers,
         "pin_memory": True,
-        "worker_init_fn": _seed_worker,
+        "worker_init_fn": partial(_init_worker, parent_affinity=parent_affinity),
         "generator": generator,
     }
     if shuffle is not None:
         loader_kwargs["shuffle"] = shuffle
     if num_workers > 0:
         loader_kwargs["persistent_workers"] = True
+        multiprocessing_context = _get(cfg, "data", "multiprocessing_context", default=None)
+        if multiprocessing_context is not None:
+            loader_kwargs["multiprocessing_context"] = str(multiprocessing_context)
     return loader_kwargs
 
 
@@ -259,11 +286,11 @@ def build_loader(cfg):
         train_dataset,
         drop_last=mixup_fn is not None,
         sampler=train_sampler,
-        **_build_loader_kwargs(batch_size, num_workers, seed, shuffle=train_sampler is None),
+        **_build_loader_kwargs(cfg, batch_size, num_workers, seed, shuffle=train_sampler is None),
     )
     val_loader = DataLoader(
         val_dataset,
-        **_build_loader_kwargs(batch_size, num_workers, seed + 1, shuffle=False),
+        **_build_loader_kwargs(cfg, batch_size, num_workers, seed + 1, shuffle=False),
     )
     return train_loader, val_loader, mixup_fn
 
@@ -280,7 +307,7 @@ def build_eval_loader(cfg, split: str = "val"):
         dataset = TinyImageNetTestDataset(test_root / "images", transform=_build_eval_transform(cfg))
         loader = DataLoader(
             dataset,
-            **_build_loader_kwargs(batch_size, num_workers, seed + 2, shuffle=False),
+            **_build_loader_kwargs(cfg, batch_size, num_workers, seed + 2, shuffle=False),
         )
         return loader, dataset
 
@@ -292,7 +319,13 @@ def build_eval_loader(cfg, split: str = "val"):
     dataset = datasets.ImageFolder(split_root, transform=_build_eval_transform(cfg))
     loader = DataLoader(
         dataset,
-        **_build_loader_kwargs(batch_size, num_workers, seed + (0 if split == "train" else 1), shuffle=False),
+        **_build_loader_kwargs(
+            cfg,
+            batch_size,
+            num_workers,
+            seed + (0 if split == "train" else 1),
+            shuffle=False,
+        ),
     )
     return loader, dataset
 
