@@ -1,0 +1,75 @@
+# 方案B student 主线首轮 KD：
+# 固定 depth10 压缩 student 与既有 light-reg recipe，
+# 仅把 teacher 替换成当前最佳 strong_teacher_polish40 (80.11%)。
+#
+# 目的：
+# 1. 在不改 student 结构与训练策略的前提下，先验证更强 teacher 的纯增益；
+# 2. 作为后续 logit KD / depth8 student 的统一对照起点。
+#
+# 运行方式：
+#   python -u scripts/train.py \
+#     --config configs/deit_tiny_patch8_112_student_depth10_deit_harddistill.yaml
+model:
+  name: deit_tiny_patch8_112
+  num_classes: 200
+  pretrained: true
+  distilled: true
+  img_size: 112
+  patch_size: 8
+  depth: 10
+  drop_path_rate: 0.05
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 112
+  batch_size: 256
+  num_workers: 4
+  use_imagenet_eval: false
+  train_crop_scale_min: 0.6
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.75
+  train_crop_ratio_max: 1.3333333333333333
+
+  # 保持历史 depth10 student 已验证过的 light-reg 数据增强，
+  # 本轮不继续改 student recipe，只隔离 teacher 变化。
+  randaugment_num_ops: 2
+  randaugment_magnitude: 9
+  random_erasing_prob: 0.10
+
+train:
+  seed: 42
+  deterministic: true
+  epochs: 70
+  lr: 5.0e-4
+  weight_decay: 0.05
+  label_smoothing: 0.05
+  mixup_alpha: 0.2
+  cutmix_alpha: 0.5
+  mixup_prob: 1.0
+  mixup_switch_prob: 0.5
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+  stages:
+    - name: main_depth10_deitdistill
+      epochs: 50
+      lr: 5.0e-4
+      warmup_epochs: 5
+      min_lr: 1.0e-6
+    - name: tail_lowlr_deitdistill
+      epochs: 20
+      lr: 1.0e-6
+      warmup_epochs: 0
+      min_lr: 1.0e-7
+  distillation:
+    enabled: true
+    method: deit
+    type: hard
+    teacher_checkpoint: results/checkpoints/20260422/deit_tiny_patch8_112_overlap_patch12_strong_teacher_polish40_20260422_171852_best.pt
+    alpha: 0.5
+    temperature: 1.0
+  max_grad_norm: 1.0
+  amp: true
+  device: cuda

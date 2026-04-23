@@ -38,6 +38,8 @@ METRIC_FIELDS = [
     "val_acc",
     "val_top5",
     "best_acc",
+    "train_time_sec",
+    "eval_time_sec",
     "epoch_time_sec",
 ]
 
@@ -871,7 +873,8 @@ def main():
             print("-" * 80)
             print(
                 f"{'epoch':>5} | {'lr':>10} | {'train_loss':>10} | "
-                f"{'val_acc(%)':>10} | {'best_acc(%)':>10} | {'time':>8}"
+                f"{'val_acc(%)':>10} | {'best_acc(%)':>10} | "
+                f"{'train_s':>8} | {'eval_s':>8} | {'total_s':>8}"
             )
             print("-" * 80)
 
@@ -979,7 +982,7 @@ def main():
                 else:
                     lr_now = float(optimizer.param_groups[0]["lr"])
 
-                start_time = time.perf_counter()
+                train_start_time = time.perf_counter()
                 train_loss = train_one_epoch(
                     model,
                     train_loader,
@@ -1002,9 +1005,12 @@ def main():
                     if distillation_cfg is None
                     else distillation_cfg["type"],
                 )
+                train_time = time.perf_counter() - train_start_time
                 eval_model, eval_device, eval_model_source = _resolve_eval_model(model, model_ema)
+                eval_start_time = time.perf_counter()
                 eval_metrics = evaluate(eval_model, val_loader, eval_device)
-                epoch_time = time.perf_counter() - start_time
+                eval_time = time.perf_counter() - eval_start_time
+                epoch_time = train_time + eval_time
                 total_train_time_sec += epoch_time
                 if lr_scheduler is not None:
                     lr_scheduler.step(local_epoch_idx)
@@ -1037,6 +1043,8 @@ def main():
                         "val_acc": val_acc,
                         "val_top5": val_top5,
                         "best_acc": best_acc,
+                        "train_time_sec": train_time,
+                        "eval_time_sec": eval_time,
                         "epoch_time_sec": epoch_time,
                     }
                 )
@@ -1072,7 +1080,8 @@ def main():
 
                 print(
                     f"{epoch_number:5d} | {lr_now:10.6f} | {float(train_loss):10.4f} | "
-                    f"{val_acc:10.2f} | {best_acc:10.2f} | {epoch_time:8.1f}s"
+                    f"{val_acc:10.2f} | {best_acc:10.2f} | "
+                    f"{train_time:8.1f}s | {eval_time:8.1f}s | {epoch_time:8.1f}s"
                 )
 
             best_checkpoint = _load_checkpoint(Path(paths["best_checkpoint_path"]))

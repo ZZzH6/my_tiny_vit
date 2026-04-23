@@ -28,6 +28,9 @@
 - `deit_tiny_patch8_112_overlap_patch12_distilled_teacher.yaml`
   teacher 自蒸馏版，供后续 student KD 对照使用。
 
+- `deit_tiny_patch8_112_student_depth10_deit_harddistill.yaml`
+  student 主线首轮 KD 配置：固定 depth10 student，仅切换到当前 80.11% best teacher，验证新 teacher 的纯增益。
+
 ## Archive Policy
 
 - `configs/archive/` 中保留历史配置，便于回查旧实验。
