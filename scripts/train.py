@@ -4,12 +4,14 @@ import argparse
 import copy
 import contextlib
 import math
+import random
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import torch
 from timm.loss import SoftTargetCrossEntropy
 from timm.scheduler import create_scheduler
@@ -143,6 +145,9 @@ def _normalize_train_stages(train_cfg: dict[str, Any]) -> list[dict[str, Any]]:
             "warmup_epochs": int(raw_stage.get("warmup_epochs", default_warmup_epochs)),
             "warmup_lr": float(raw_stage.get("warmup_lr", train_cfg.get("warmup_lr", 1.0e-6))),
             "min_lr": float(raw_stage.get("min_lr", default_min_lr)),
+            "load_best_from_previous_stage": bool(raw_stage.get("load_best_from_previous_stage", False)),
+            "reset_optimizer": bool(raw_stage.get("reset_optimizer", False)),
+            "reset_scaler": bool(raw_stage.get("reset_scaler", False)),
         }
         data_overrides = raw_stage.get("data_overrides")
         if data_overrides is not None:
@@ -207,6 +212,16 @@ def _build_stage_runtime_cfg(cfg: dict[str, Any], stage_cfg: dict[str, Any]) -> 
         stage_runtime_cfg["train"] = _deep_merge_dict(stage_runtime_cfg["train"], train_overrides)
 
     return stage_runtime_cfg
+
+
+def _build_stage_train_cfg(runtime_cfg: dict[str, Any], stage_cfg: dict[str, Any]) -> dict[str, Any]:
+    stage_train_cfg = copy.deepcopy(runtime_cfg["train"])
+    stage_train_cfg["epochs"] = int(stage_cfg["epochs"])
+    stage_train_cfg["lr"] = float(stage_cfg["lr"])
+    stage_train_cfg["warmup_epochs"] = int(stage_cfg["warmup_epochs"])
+    stage_train_cfg["warmup_lr"] = float(stage_cfg["warmup_lr"])
+    stage_train_cfg["min_lr"] = float(stage_cfg["min_lr"])
+    return stage_train_cfg
 
 
 def _param_groups_weight_decay(model: torch.nn.Module, weight_decay: float):
@@ -317,6 +332,14 @@ def _build_timm_scheduler(train_cfg: dict[str, Any], optimizer, epochs: int):
     )
     lr_scheduler, _ = create_scheduler(scheduler_args, optimizer)
     return lr_scheduler
+
+
+def _set_optimizer_base_lr(optimizer: torch.optim.Optimizer, base_lr: float) -> None:
+    for param_group in optimizer.param_groups:
+        lr_scale = float(param_group.get("lr_scale", 1.0))
+        group_lr = float(base_lr) * lr_scale
+        param_group["lr"] = group_lr
+        param_group["initial_lr"] = group_lr
 
 
 def _resolve_max_grad_norm(train_cfg: dict[str, Any]) -> float | None:
@@ -433,6 +456,57 @@ def _artifact_paths_to_str(paths: dict[str, Path | str]) -> dict[str, str]:
     return {key: str(paths[key]) for key in ARTIFACT_KEYS}
 
 
+def _capture_rng_state() -> dict[str, Any]:
+    rng_state: dict[str, Any] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        rng_state["torch_cuda"] = [state.cpu() for state in torch.cuda.get_rng_state_all()]
+    return rng_state
+
+
+def _apply_rng_state(rng_state: Any) -> bool:
+    if not isinstance(rng_state, dict):
+        return False
+
+    python_state = rng_state.get("python")
+    numpy_state = rng_state.get("numpy")
+    torch_state = rng_state.get("torch")
+
+    if python_state is None or numpy_state is None or torch_state is None:
+        return False
+
+    random.setstate(python_state)
+    np.random.set_state(numpy_state)
+    torch.set_rng_state(torch_state)
+
+    cuda_states = rng_state.get("torch_cuda")
+    if torch.cuda.is_available() and cuda_states is not None:
+        if isinstance(cuda_states, (list, tuple)) and len(cuda_states) == torch.cuda.device_count():
+            torch.cuda.set_rng_state_all(list(cuda_states))
+        elif isinstance(cuda_states, (list, tuple)) and len(cuda_states) > 0:
+            torch.cuda.set_rng_state(cuda_states[0])
+        elif torch.is_tensor(cuda_states):
+            torch.cuda.set_rng_state(cuda_states)
+
+    return True
+
+
+def _restore_rng_state_from_checkpoint(
+    checkpoint: dict[str, Any],
+    *,
+    fallback_seed: int | None,
+    deterministic: bool,
+) -> None:
+    if _apply_rng_state(checkpoint.get("rng_state")):
+        return
+
+    if fallback_seed is not None:
+        seed_everything(int(fallback_seed), deterministic=deterministic)
+
+
 def _resolve_paths(config_stem: str, resume_path: Path | None):
     results_root = ROOT / "results"
     if resume_path is None:
@@ -487,6 +561,7 @@ def _build_checkpoint_payload(
         "flops_note": profile["flops_note"],
         "model_state": model_state,
         "model_state_source": str(model_state_source),
+        "rng_state": _capture_rng_state(),
     }
 
 
@@ -579,9 +654,6 @@ def main():
             model_cfg = cfg["model"]
             data_cfg = cfg["data"]
             train_cfg = cfg["train"]
-            use_timm_scheduler = bool(train_cfg.get("use_timm_scheduler", False))
-            if use_timm_scheduler and train_cfg.get("stages") is not None:
-                raise ValueError("train.use_timm_scheduler is not supported when train.stages is set.")
             train_stages = _normalize_train_stages(train_cfg)
             train_stages = _apply_lr_scaling_to_stages(
                 train_cfg,
@@ -636,7 +708,17 @@ def main():
             runtime_cfg = _build_stage_runtime_cfg(cfg, train_stages[0])
             train_loader, val_loader, mixup_fn = build_loader(runtime_cfg)
             optimizer = _build_optimizer(model, train_cfg, lr=float(train_stages[0]["lr"]))
-            lr_scheduler = _build_timm_scheduler(train_cfg, optimizer, epochs) if use_timm_scheduler else None
+            stage_train_cfg = _build_stage_train_cfg(runtime_cfg, train_stages[0])
+            lr_scheduler = None
+            lr_scheduler_stage_idx = None
+            if bool(stage_train_cfg.get("use_timm_scheduler", False)):
+                _set_optimizer_base_lr(optimizer, float(stage_train_cfg["lr"]))
+                lr_scheduler = _build_timm_scheduler(
+                    stage_train_cfg,
+                    optimizer,
+                    int(stage_train_cfg["epochs"]),
+                )
+                lr_scheduler_stage_idx = 1
             criterion = _build_criterion(runtime_cfg, use_mixup=mixup_fn is not None)
             amp_enabled = bool(_get(cfg, "train", "amp", default=True)) and device.type == "cuda"
             scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
@@ -659,17 +741,17 @@ def main():
                         # this, finetuning from an init checkpoint while
                         # evaluating EMA starts from a random EMA model.
                         model_ema.ema.load_state_dict(init_checkpoint["model_state"])
+                _restore_rng_state_from_checkpoint(
+                    init_checkpoint,
+                    fallback_seed=seed,
+                    deterministic=deterministic,
+                )
 
             if resume_checkpoint is not None:
                 model.load_state_dict(resume_checkpoint["model_state"])
                 if "optimizer_state" in resume_checkpoint:
                     optimizer.load_state_dict(resume_checkpoint["optimizer_state"])
                     _move_optimizer_state_to_device(optimizer, device)
-                if lr_scheduler is not None:
-                    if resume_checkpoint.get("lr_scheduler_state") is not None:
-                        lr_scheduler.load_state_dict(resume_checkpoint["lr_scheduler_state"])
-                    else:
-                        lr_scheduler.step(int(resume_checkpoint.get("current_epoch", 0)))
                 if model_ema is not None and resume_checkpoint.get("model_ema_state") is not None:
                     model_ema.ema.load_state_dict(resume_checkpoint["model_ema_state"])
                 if "scaler_state" in resume_checkpoint:
@@ -679,6 +761,26 @@ def main():
                 best_acc = float(resume_checkpoint.get("best_acc", float("-inf")))
                 best_epoch = int(resume_checkpoint.get("best_epoch", 0))
                 total_train_time_sec = float(resume_checkpoint.get("total_train_time_sec", 0.0))
+                _restore_rng_state_from_checkpoint(
+                    resume_checkpoint,
+                    fallback_seed=None,
+                    deterministic=deterministic,
+                )
+
+            resume_lr_scheduler_state = None
+            resume_lr_scheduler_stage_idx = None
+            if resume_checkpoint is not None:
+                resume_lr_scheduler_state = resume_checkpoint.get("lr_scheduler_state")
+                raw_resume_stage_idx = resume_checkpoint.get("lr_scheduler_stage_idx")
+                if raw_resume_stage_idx is not None:
+                    resume_lr_scheduler_stage_idx = int(raw_resume_stage_idx)
+                elif resume_lr_scheduler_state is not None and start_epoch < epochs:
+                    inferred_stage_idx, _, inferred_local_epoch_idx = _stage_for_epoch(
+                        train_stages,
+                        start_epoch,
+                    )
+                    if len(train_stages) == 1 or inferred_local_epoch_idx > 0:
+                        resume_lr_scheduler_stage_idx = inferred_stage_idx
 
             dump_csv(Path(paths["metrics_path"]), history, METRIC_FIELDS)
 
@@ -693,14 +795,17 @@ def main():
             print(f"batch size : {data_cfg['batch_size']}")
             print(f"epochs     : {epochs}")
             print(f"optimizer  : {str(train_cfg.get('opt', 'adamw')).lower()}")
-            if use_timm_scheduler:
-                print(f"scheduler  : {str(train_cfg.get('sched', 'cosine')).lower()} (timm)")
+            if len(train_stages) == 1:
+                if bool(stage_train_cfg.get("use_timm_scheduler", False)):
+                    print(f"scheduler  : {str(stage_train_cfg.get('sched', 'cosine')).lower()} (timm)")
+                else:
+                    print("scheduler  : manual cosine")
                 print(f"base lr    : {train_stages[0]['lr']}")
-                print(f"warmup lr  : {float(train_cfg.get('warmup_lr', 1.0e-6))}")
+                print(f"warmup lr  : {stage_train_cfg['warmup_lr']}")
             else:
-                print("scheduler  : manual cosine")
+                print("scheduler  : stage-specific")
                 print(f"base lr    : {train_stages[0]['lr']}")
-                print(f"warmup lr  : {train_stages[0]['warmup_lr']}")
+                print(f"warmup lr  : {stage_train_cfg['warmup_lr']}")
             print(f"model ema  : {'enabled' if model_ema is not None else 'disabled'}")
             print(f"val model  : {'ema' if model_ema is not None else 'model'}")
             print(f"wd         : {train_cfg['weight_decay']}")
@@ -737,11 +842,31 @@ def main():
             if len(train_stages) > 1:
                 print("stages     :")
                 for stage_idx, stage in enumerate(train_stages, start=1):
+                    stage_runtime_cfg = _build_stage_runtime_cfg(cfg, stage)
+                    stage_train_cfg = _build_stage_train_cfg(stage_runtime_cfg, stage)
+                    stage_sched_label = (
+                        f"{str(stage_train_cfg.get('sched', 'cosine')).lower()} (timm)"
+                        if bool(stage_train_cfg.get("use_timm_scheduler", False))
+                        else "manual cosine"
+                    )
+                    stage_transition_flags: list[str] = []
+                    if bool(stage.get("load_best_from_previous_stage", False)):
+                        stage_transition_flags.append("load_prev_best")
+                    if bool(stage.get("reset_optimizer", False)):
+                        stage_transition_flags.append("reset_optimizer")
+                    if bool(stage.get("reset_scaler", False)):
+                        stage_transition_flags.append("reset_scaler")
+                    stage_transition_note = (
+                        f" | transition={','.join(stage_transition_flags)}"
+                        if stage_transition_flags
+                        else ""
+                    )
                     print(
                         "  "
                         f"{stage_idx}. {stage['name']} | epochs={stage['epochs']} | lr={stage['lr']} | "
                         f"warmup={stage['warmup_epochs']} | warmup_lr={stage['warmup_lr']} | "
-                        f"min_lr={stage['min_lr']}"
+                        f"min_lr={stage['min_lr']} | scheduler={stage_sched_label}"
+                        f"{stage_transition_note}"
                     )
             print("-" * 80)
             print(
@@ -758,14 +883,82 @@ def main():
                     train_loader.sampler.set_epoch(epoch_idx)
                 if stage_idx != previous_stage_idx:
                     runtime_cfg = _build_stage_runtime_cfg(cfg, stage_cfg)
+                    stage_train_cfg = _build_stage_train_cfg(runtime_cfg, stage_cfg)
+                    should_apply_stage_reset = (
+                        local_epoch_idx == 0
+                        and (
+                            bool(stage_cfg.get("load_best_from_previous_stage", False))
+                            or bool(stage_cfg.get("reset_optimizer", False))
+                            or bool(stage_cfg.get("reset_scaler", False))
+                        )
+                    )
+                    if should_apply_stage_reset:
+                        if bool(stage_cfg.get("load_best_from_previous_stage", False)):
+                            previous_best_checkpoint = _load_checkpoint(Path(paths["best_checkpoint_path"]))
+                            model.load_state_dict(previous_best_checkpoint["model_state"])
+                            if model_ema is not None:
+                                previous_best_ema_state = previous_best_checkpoint.get("model_ema_state")
+                                if previous_best_ema_state is not None:
+                                    model_ema.ema.load_state_dict(previous_best_ema_state)
+                                else:
+                                    model_ema.ema.load_state_dict(previous_best_checkpoint["model_state"])
+                            _restore_rng_state_from_checkpoint(
+                                previous_best_checkpoint,
+                                fallback_seed=seed,
+                                deterministic=deterministic,
+                            )
+                        if bool(stage_cfg.get("reset_optimizer", False)):
+                            optimizer = _build_optimizer(
+                                model,
+                                stage_train_cfg,
+                                lr=float(stage_cfg["lr"]),
+                            )
+                        if bool(stage_cfg.get("reset_scaler", False)):
+                            scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
                     train_loader, val_loader, mixup_fn = build_loader(runtime_cfg)
                     criterion = _build_criterion(runtime_cfg, use_mixup=mixup_fn is not None)
                     max_grad_norm = _resolve_max_grad_norm(runtime_cfg["train"])
+                    if bool(stage_train_cfg.get("use_timm_scheduler", False)):
+                        _set_optimizer_base_lr(optimizer, float(stage_train_cfg["lr"]))
+                        lr_scheduler = _build_timm_scheduler(
+                            stage_train_cfg,
+                            optimizer,
+                            int(stage_train_cfg["epochs"]),
+                        )
+                        if (
+                            epoch_idx == start_epoch
+                            and resume_lr_scheduler_state is not None
+                            and resume_lr_scheduler_stage_idx == stage_idx
+                        ):
+                            lr_scheduler.load_state_dict(resume_lr_scheduler_state)
+                        elif epoch_idx == start_epoch and local_epoch_idx > 0:
+                            lr_scheduler.step(local_epoch_idx)
+                    else:
+                        lr_scheduler = None
+                    lr_scheduler_stage_idx = stage_idx
+                    stage_sched_label = (
+                        f"{str(stage_train_cfg.get('sched', 'cosine')).lower()} (timm)"
+                        if bool(stage_train_cfg.get("use_timm_scheduler", False))
+                        else "manual cosine"
+                    )
+                    stage_transition_flags: list[str] = []
+                    if should_apply_stage_reset and bool(stage_cfg.get("load_best_from_previous_stage", False)):
+                        stage_transition_flags.append("load_prev_best")
+                    if should_apply_stage_reset and bool(stage_cfg.get("reset_optimizer", False)):
+                        stage_transition_flags.append("reset_optimizer")
+                    if should_apply_stage_reset and bool(stage_cfg.get("reset_scaler", False)):
+                        stage_transition_flags.append("reset_scaler")
+                    stage_transition_note = (
+                        f", transition={','.join(stage_transition_flags)}"
+                        if stage_transition_flags
+                        else ""
+                    )
                     print(
                         f"enter stage {stage_idx}/{len(train_stages)}: {stage_cfg['name']} "
                         f"(epochs={stage_cfg['epochs']}, lr={stage_cfg['lr']}, "
                         f"warmup={stage_cfg['warmup_epochs']}, warmup_lr={stage_cfg['warmup_lr']}, "
-                        f"min_lr={stage_cfg['min_lr']})"
+                        f"min_lr={stage_cfg['min_lr']}, scheduler={stage_sched_label}"
+                        f"{stage_transition_note})"
                     )
                     previous_stage_idx = stage_idx
 
@@ -814,7 +1007,7 @@ def main():
                 epoch_time = time.perf_counter() - start_time
                 total_train_time_sec += epoch_time
                 if lr_scheduler is not None:
-                    lr_scheduler.step(epoch_idx)
+                    lr_scheduler.step(local_epoch_idx)
 
                 val_acc = float(eval_metrics["top1"])
                 val_top5 = float(eval_metrics["top5"])
@@ -866,6 +1059,7 @@ def main():
                         "lr_scheduler_state": (
                             lr_scheduler.state_dict() if lr_scheduler is not None else None
                         ),
+                        "lr_scheduler_stage_idx": lr_scheduler_stage_idx,
                         "model_ema_state": (
                             _cpu_state_dict(model_ema.ema) if model_ema is not None else None
                         ),
