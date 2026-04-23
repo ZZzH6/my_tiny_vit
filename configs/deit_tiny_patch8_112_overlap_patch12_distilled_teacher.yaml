@@ -25,6 +25,8 @@ data:
   img_size: 112
   batch_size: 256
   num_workers: 4
+  multiprocessing_context: spawn
+  inherit_parent_affinity: true
   use_timm_create_transform: true
   use_imagenet_eval: false
   repeated_aug: true

@@ -1,11 +1,23 @@
-# 方案B：64 -> 112, patch8 baseline。用于验证从 224 强 recipe 适度减弱后，
-# 在 112 主线上不加模块时能达到的基线水平。
+# 方案B student 强化版：保持 depth10 轻量化 student，不改主结构，
+# 直接复用当前最强 patch8_112 baseline 的训练 recipe，
+# 并将 DeiT-style hard distill 改为 soft logit KD。
+#
+# 目的：
+# 1. 让 depth10 student 在公平训练策略下尽量逼近 patch8_112 baseline；
+# 2. 用 soft teacher distribution 替代 argmax 硬标签，提升强 teacher 的知识传递效率；
+# 3. 目标是稳定超过 77.37% 的 224 baseline，同时保持 depth10 的参数/FLOPs 优势。
+#
+# 运行方式：
+#   python -u scripts/train.py \
+#     --config configs/deit_tiny_patch8_112_student_depth10_logit_softkd.yaml
 model:
   name: deit_tiny_patch8_112
   num_classes: 200
   pretrained: true
+  distilled: false
   img_size: 112
   patch_size: 8
+  depth: 10
   drop_path_rate: 0.1
   drop_rate: 0.0
   attn_drop_rate: 0.0
@@ -56,6 +68,13 @@ train:
   warmup_epochs: 5
   warmup_lr: 1.0e-6
   min_lr: 1.0e-6
+  distillation:
+    enabled: true
+    method: logit
+    type: soft
+    teacher_checkpoint: results/checkpoints/20260422/deit_tiny_patch8_112_overlap_patch12_strong_teacher_polish40_20260422_171852_best.pt
+    alpha: 0.4
+    temperature: 4.0
   max_grad_norm: 1.0
   model_ema: true
   model_ema_decay: 0.99996

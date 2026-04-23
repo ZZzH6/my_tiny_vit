@@ -16,20 +16,14 @@
 - `deit_tiny_patch8_112_overlap_patch12.yaml`
   方案B 当前有效的结构改进：overlap patch embedding。
 
-- `deit_tiny_patch8_112_overlap_patch12_strong_teacher.yaml`
-  overlap teacher 的强 recipe 版本，用于 teacher 强化基线。
-
-- `deit_tiny_patch8_112_overlap_patch12_strong_teacher_polish40.yaml`
-  从 strong teacher best checkpoint 出发的 40 epoch 尾训版，对应当前已跑通的 80.11% teacher。
-
 - `deit_tiny_patch8_112_overlap_patch12_teacher_twostage.yaml`
   单命令复现版：完整训练 + 尾训两阶段 teacher。
 
 - `deit_tiny_patch8_112_overlap_patch12_distilled_teacher.yaml`
   teacher 自蒸馏版，供后续 student KD 对照使用。
 
-- `deit_tiny_patch8_112_student_depth10_deit_harddistill.yaml`
-  student 主线首轮 KD 配置：固定 depth10 student，仅切换到当前 80.11% best teacher，验证新 teacher 的纯增益。
+- `deit_tiny_patch8_112_student_depth10_logit_softkd.yaml`
+  depth10 student 强化配置：保持轻量化结构，训练 recipe 对齐 patch8_112 baseline，并改用 soft logit KD 提升 teacher 知识迁移效率。
 
 ## Archive Policy
 
@@ -37,6 +31,7 @@
 - 已归档的配置主要包括：
   - 已确认收益不明显的局部模块尝试
   - 已被更新主线替代的中间配置
+  - 已被 `teacher_twostage` / `logit_softkd` 替代的中间 teacher 与旧 student KD 配置
   - 早期 50 epoch / tail tuning / student 搜索配置
 
 ## Notes
