@@ -1,0 +1,85 @@
+# 方案B student depth9：在当前 depth10 soft logit KD 成功结果上继续压缩一层。
+#
+# 单变量目的：
+# 1. 只将 depth 从 10 降到 9，teacher 与训练 recipe 保持不变；
+# 2. 验证更低 Params/FLOPs 下是否仍能超过 224 DeiT baseline；
+# 3. 若精度保持在 78% 左右，可作为论文中的更强轻量化 student。
+#
+# 预期复杂度：
+# - Params: 约 4.12M
+# - FLOPs : 约 1.58G（thop, FLOPs=2xMACs）
+#
+# 运行方式：
+#   python -u scripts/train.py \
+#     --config configs/deit_tiny_patch8_112_student_depth9_logit_softkd.yaml
+model:
+  name: deit_tiny_patch8_112
+  num_classes: 200
+  pretrained: true
+  distilled: false
+  img_size: 112
+  patch_size: 8
+  depth: 9
+  drop_path_rate: 0.1
+  drop_rate: 0.0
+  attn_drop_rate: 0.0
+
+data:
+  dataset: tiny_imagenet
+  root: dataset/tiny-imagenet-200
+  img_size: 112
+  batch_size: 256
+  num_workers: 4
+  multiprocessing_context: spawn
+  inherit_parent_affinity: true
+  use_timm_create_transform: true
+  use_imagenet_eval: false
+  train_interpolation: bicubic
+  eval_interpolation: bicubic
+  color_jitter: 0.2
+  auto_augment: rand-m7-mstd0.5-inc1
+  train_crop_scale_min: 0.6
+  train_crop_scale_max: 1.0
+  train_crop_ratio_min: 0.75
+  train_crop_ratio_max: 1.3333333333333333
+  random_erasing_prob: 0.15
+  random_erasing_mode: pixel
+  random_erasing_count: 1
+
+train:
+  seed: 42
+  deterministic: true
+  use_timm_scheduler: true
+  epochs: 150
+  opt: adamw
+  opt_eps: 1.0e-8
+  lr: 5.0e-4
+  scale_lr_by_batch: true
+  lr_reference_batch_size: 512
+  weight_decay: 0.05
+  label_smoothing: 0.1
+  mixup_alpha: 0.2
+  cutmix_alpha: 0.5
+  mixup_prob: 1.0
+  mixup_switch_prob: 0.5
+  sched: cosine
+  decay_epochs: 30
+  cooldown_epochs: 10
+  patience_epochs: 10
+  decay_rate: 0.1
+  warmup_epochs: 5
+  warmup_lr: 1.0e-6
+  min_lr: 1.0e-6
+  distillation:
+    enabled: true
+    method: logit
+    type: soft
+    teacher_checkpoint: results/checkpoints/20260422/deit_tiny_patch8_112_overlap_patch12_strong_teacher_polish40_20260422_171852_best.pt
+    alpha: 0.4
+    temperature: 4.0
+  max_grad_norm: 1.0
+  model_ema: true
+  model_ema_decay: 0.99996
+  model_ema_force_cpu: false
+  amp: true
+  device: cuda
