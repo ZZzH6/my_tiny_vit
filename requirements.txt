@@ -1,0 +1,9 @@
+streamlit
+torch
+torchvision
+timm==1.0.25
+pandas
+PyYAML
+Pillow
+matplotlib
+numpy
