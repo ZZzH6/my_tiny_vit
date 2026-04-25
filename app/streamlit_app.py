@@ -1024,6 +1024,19 @@ def render_footer() -> None:
     )
 
 
+def resolve_default_compare_title(primary_title: str, secondary_options: list[str]) -> str | None:
+    preferred_titles = [
+        "Patch8 112 Baseline",
+        "Student D10 Final",
+        "Teacher Two-Stage",
+        "DeiT 224 Baseline",
+    ]
+    for title in preferred_titles:
+        if title != primary_title and title in secondary_options:
+            return title
+    return secondary_options[0] if secondary_options else None
+
+
 def main() -> None:
     inject_theme()
 
@@ -1040,12 +1053,14 @@ def main() -> None:
     compare_key = None
     if compare_mode:
         secondary_options = [title for title in model_titles if title != primary_title]
-        secondary_title = st.sidebar.selectbox(
-            "Compare against",
-            secondary_options,
-            index=secondary_options.index("Patch8 112 Baseline"),
-        )
-        compare_key = model_titles[secondary_title]
+        default_secondary_title = resolve_default_compare_title(primary_title, secondary_options)
+        if default_secondary_title is not None:
+            secondary_title = st.sidebar.selectbox(
+                "Compare against",
+                secondary_options,
+                index=secondary_options.index(default_secondary_title),
+            )
+            compare_key = model_titles[secondary_title]
 
     device = st.sidebar.selectbox("Inference device", device_candidates, index=0)
     topk = st.sidebar.slider("Top-K outputs", min_value=3, max_value=5, value=5)
