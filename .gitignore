@@ -1,3 +1,5 @@
+tools/deit_resize_demo.py
+results/resize_demo
 .codex
 AGENTS.md
 DESIGN.md

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -29,6 +30,72 @@ st.set_page_config(
 
 
 SAMPLE_IMAGE_PATH = Path(__file__).resolve().parents[1] / "results/resize_demo/dog64x64_deit_bicubic_112.jpg"
+DEPLOYMENT_METADATA_PATH = Path(__file__).with_name("deployment_metadata.json")
+OVERVIEW_STATIC_FALLBACKS = {
+    "baseline_112": {
+        "best_val_acc": 79.46,
+        "params_m": 5.45,
+        "flops_g": 2.106043392,
+        "input_size": 112,
+    },
+    "teacher_final": {
+        "best_val_acc": 80.18,
+        "params_m": 5.50,
+        "flops_g": 2.124106752,
+        "input_size": 112,
+    },
+}
+
+
+@st.cache_data(show_spinner=False)
+def load_deployment_metadata() -> dict[str, object]:
+    if not DEPLOYMENT_METADATA_PATH.exists():
+        return {}
+    try:
+        with DEPLOYMENT_METADATA_PATH.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def safe_float(value: object) -> float | None:
+    if value in (None, "", "N/A"):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_overview_metadata(model_key: str) -> dict[str, object]:
+    meta = get_model_meta(model_key)
+    summary = meta.get("summary", {})
+    merged: dict[str, object] = {}
+    merged.update(OVERVIEW_STATIC_FALLBACKS.get(model_key, {}))
+    if isinstance(summary, dict):
+        merged.update(summary)
+    if model_key == "student_final":
+        merged.update(load_deployment_metadata())
+    return merged
+
+
+def format_overview_metric(value: float | None, digits: int = 2, suffix: str = "") -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.{digits}f}{suffix}"
+
+
+def compute_flop_reduction(student_flops: float | None, baseline_flops: float | None) -> float | None:
+    if student_flops is None or baseline_flops in (None, 0.0):
+        return None
+    return (1.0 - student_flops / baseline_flops) * 100.0
+
+
+def compute_teacher_gap(student_top1: float | None, teacher_top1: float | None) -> float | None:
+    if student_top1 is None or teacher_top1 is None:
+        return None
+    return teacher_top1 - student_top1
 
 
 def inject_theme() -> None:
@@ -657,31 +724,31 @@ def build_accuracy_flops_figure() -> plt.Figure:
     return fig
 
 
-def get_overview_metrics() -> dict[str, float]:
-    student = get_model_meta("student_final")["summary"]
-    teacher = get_model_meta("teacher_final")["summary"]
-    baseline = get_model_meta("baseline_112")["summary"]
+def get_overview_metrics() -> dict[str, float | None]:
+    student = merge_overview_metadata("student_final")
+    teacher = merge_overview_metadata("teacher_final")
+    baseline = merge_overview_metadata("baseline_112")
     return {
-        "student_top1": float(student["best_val_acc"]),
-        "student_params": float(student["params_m"]),
-        "student_flops": float(student["flops_g"]),
-        "teacher_top1": float(teacher["best_val_acc"]),
-        "baseline_top1": float(baseline["best_val_acc"]),
-        "baseline_flops": float(baseline["flops_g"]),
+        "student_top1": safe_float(student.get("best_val_acc")),
+        "student_params": safe_float(student.get("params_m")),
+        "student_flops": safe_float(student.get("flops_g")),
+        "teacher_top1": safe_float(teacher.get("best_val_acc")),
+        "baseline_top1": safe_float(baseline.get("best_val_acc")),
+        "baseline_flops": safe_float(baseline.get("flops_g")),
     }
 
 
 def render_overview() -> None:
     metrics = get_overview_metrics()
-    flop_reduction = (1.0 - metrics["student_flops"] / metrics["baseline_flops"]) * 100.0
-    teacher_gap = metrics["teacher_top1"] - metrics["student_top1"]
+    flop_reduction = compute_flop_reduction(metrics["student_flops"], metrics["baseline_flops"])
+    teacher_gap = compute_teacher_gap(metrics["student_top1"], metrics["teacher_top1"])
 
     cols = st.columns(4)
     cards = [
-        stat_card("Deployed student", f"{metrics['student_top1']:.2f}%", "最终学生模型验证精度。"),
-        stat_card("Model size", f"{metrics['student_params']:.2f}M", "最终 student 参数量。"),
-        stat_card("FLOPs reduction", f"{flop_reduction:.1f}%", "相对 112 baseline 的推理复杂度下降。"),
-        stat_card("Teacher gap", f"{teacher_gap:.2f} pp", "最终 student 与最终 teacher 的精度差。"),
+        stat_card("Deployed student", format_overview_metric(metrics["student_top1"], suffix="%"), "最终学生模型验证精度。"),
+        stat_card("Model size", format_overview_metric(metrics["student_params"], suffix="M"), "最终 student 参数量。"),
+        stat_card("FLOPs reduction", format_overview_metric(flop_reduction, digits=1, suffix="%"), "相对 112 baseline 的推理复杂度下降。"),
+        stat_card("Teacher gap", format_overview_metric(teacher_gap, suffix=" pp"), "最终 student 与最终 teacher 的精度差。"),
     ]
     for col, html in zip(cols, cards):
         with col:

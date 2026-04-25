@@ -1,0 +1,8 @@
+{
+  "model_name": "deit_tiny_patch8_112_student_depth10_deit_harddistill_twostage",
+  "best_val_acc": 79.41,
+  "params_m": 4.6,
+  "flops_g": 1.766381568,
+  "checkpoint_path": "results/checkpoints/20260424/deit_tiny_patch8_112_student_depth10_deit_harddistill_twostage_20260424_180111_best.pt",
+  "input_size": 112
+}
