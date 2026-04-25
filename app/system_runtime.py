@@ -22,6 +22,8 @@ if str(ROOT) not in sys.path:
 from data.build_loader import IMAGENET_MEAN, IMAGENET_STD
 from models import build_model_from_cfg
 
+MIN_CHECKPOINT_BYTES = 1024
+
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -82,6 +84,10 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         color="#22c55e",
     ),
 }
+
+
+class CheckpointLoadError(RuntimeError):
+    """Raised when a deployment checkpoint cannot be safely loaded."""
 
 
 def parse_summary_markdown(path: Path) -> dict[str, str]:
@@ -167,6 +173,96 @@ def build_eval_transform(cfg: dict[str, Any]):
     )
 
 
+def format_file_size(size_bytes: int | None) -> str:
+    if size_bytes is None:
+        return "N/A"
+    size = float(size_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024.0 or unit == "TiB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size_bytes} B"
+
+
+def build_checkpoint_error_message(path: Path, size_bytes: int | None, reason: str) -> str:
+    size_text = format_file_size(size_bytes)
+    return "\n".join(
+        [
+            "Checkpoint load failed.",
+            f"checkpoint_path: {path}",
+            f"file_size: {size_text} ({size_bytes if size_bytes is not None else 'N/A'} bytes)",
+            f"torch_version: {torch.__version__}",
+            f"reason: {reason}",
+        ]
+    )
+
+
+def validate_checkpoint_file(path: Path) -> int:
+    if not path.exists():
+        raise CheckpointLoadError(build_checkpoint_error_message(path, None, "checkpoint file does not exist"))
+
+    size_bytes = path.stat().st_size
+    if size_bytes <= 0:
+        raise CheckpointLoadError(build_checkpoint_error_message(path, size_bytes, "checkpoint file is empty"))
+
+    if size_bytes < MIN_CHECKPOINT_BYTES:
+        prefix = path.read_bytes()[:256]
+        if b"git-lfs.github.com/spec/v1" in prefix:
+            raise CheckpointLoadError(
+                build_checkpoint_error_message(
+                    path,
+                    size_bytes,
+                    "checkpoint file is a Git LFS pointer, not the real binary payload",
+                )
+            )
+        raise CheckpointLoadError(
+            build_checkpoint_error_message(
+                path,
+                size_bytes,
+                f"checkpoint file is unexpectedly small (< {MIN_CHECKPOINT_BYTES} bytes)",
+            )
+        )
+
+    return size_bytes
+
+
+def load_checkpoint_file(path: Path) -> dict[str, Any]:
+    size_bytes = validate_checkpoint_file(path)
+    try:
+        try:
+            checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        except TypeError as exc:
+            if "weights_only" not in str(exc):
+                raise
+            checkpoint = torch.load(path, map_location="cpu")
+    except CheckpointLoadError:
+        raise
+    except Exception as exc:
+        raise CheckpointLoadError(
+            build_checkpoint_error_message(
+                path,
+                size_bytes,
+                f"torch.load raised {type(exc).__name__}: {exc}",
+            )
+        ) from exc
+
+    if not isinstance(checkpoint, dict):
+        raise CheckpointLoadError(
+            build_checkpoint_error_message(
+                path,
+                size_bytes,
+                f"unexpected checkpoint type: {type(checkpoint).__name__}",
+            )
+        )
+    if "model_state" not in checkpoint:
+        raise CheckpointLoadError(
+            build_checkpoint_error_message(path, size_bytes, "checkpoint missing required key: model_state")
+        )
+    return checkpoint
+
+
 @st.cache_data(show_spinner=False)
 def get_model_meta(model_key: str) -> dict[str, Any]:
     spec = MODEL_SPECS[model_key]
@@ -190,7 +286,7 @@ def load_model(model_key: str, device: str):
     cfg = meta["cfg"]
     spec: ModelSpec = meta["spec"]
     model = build_model_from_cfg(cfg["model"], pretrained_override=False)
-    checkpoint = torch.load(spec.checkpoint_path, map_location="cpu")
+    checkpoint = load_checkpoint_file(spec.checkpoint_path)
     model.load_state_dict(checkpoint["model_state"])
     torch_device = torch.device(device)
     model = model.to(torch_device)

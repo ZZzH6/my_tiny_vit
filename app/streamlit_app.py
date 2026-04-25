@@ -10,6 +10,7 @@ import torch
 from PIL import Image
 
 from system_runtime import (
+    CheckpointLoadError,
     MODEL_SPECS,
     build_model_catalog,
     build_scatter_frame,
@@ -789,8 +790,12 @@ def render_live_inference(primary_key: str, compare_key: str | None, device: str
         for idx, model_key in enumerate(keys):
             spec = MODEL_SPECS[model_key]
             with result_cols[idx]:
-                with st.spinner(f"加载 {spec.title} 并执行推理..."):
-                    result = predict_image(model_key, image=image, device=device, topk=topk)
+                try:
+                    with st.spinner(f"加载 {spec.title} 并执行推理..."):
+                        result = predict_image(model_key, image=image, device=device, topk=topk)
+                except CheckpointLoadError as exc:
+                    st.error(f"{spec.title} 加载失败\n\n{exc}")
+                    continue
                 results.append(result)
                 render_result(result, spec.color)
 
@@ -833,8 +838,12 @@ def render_batch_inference(device: str, topk: int) -> None:
     )
 
     if uploads:
-        with st.spinner(f"使用 {selected_title} 进行批量推理..."):
-            df = predict_batch(selected_key, files=uploads, device=device, topk=topk)
+        try:
+            with st.spinner(f"使用 {selected_title} 进行批量推理..."):
+                df = predict_batch(selected_key, files=uploads, device=device, topk=topk)
+        except CheckpointLoadError as exc:
+            st.error(f"{selected_title} 加载失败\n\n{exc}")
+            return
         c1, c2, c3 = st.columns(3)
         c1.metric("样本数量", f"{len(df)}")
         c2.metric("平均置信度", f"{df['top1_prob'].mean() * 100.0:.2f}%")
