@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import time
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from models import build_model_from_cfg
 
 MIN_CHECKPOINT_BYTES = 1024
 DEFAULT_DATASET_ROOT = ROOT / "dataset/tiny-imagenet-200"
+CLASS_INDEX_PATH = Path(__file__).with_name("class_index_imagenet_tiny.json")
 
 
 @dataclass(frozen=True)
@@ -124,6 +126,22 @@ def resolve_dataset_root(summary: dict[str, str]) -> Path:
     return DEFAULT_DATASET_ROOT
 
 
+def load_class_index_names() -> list[str]:
+    if not CLASS_INDEX_PATH.exists():
+        return []
+    try:
+        payload = json.loads(CLASS_INDEX_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    class_names = payload.get("class_names", [])
+    if not isinstance(class_names, list):
+        return []
+    cleaned = [str(name).strip() for name in class_names if str(name).strip()]
+    return cleaned
+
+
 def load_wnids(dataset_root: Path) -> list[str]:
     wnids_path = dataset_root / "wnids.txt"
     if not wnids_path.exists():
@@ -158,12 +176,12 @@ def load_words_map(dataset_root: Path) -> dict[str, str]:
 
 
 def get_class_names(dataset_root: Path) -> list[str]:
-    wnids = load_wnids(dataset_root)
-    if wnids:
-        return wnids
+    class_index_names = load_class_index_names()
+    if class_index_names:
+        return class_index_names
     train_root = dataset_root / "train"
     if not train_root.exists():
-        return []
+        return load_wnids(dataset_root)
     return sorted(path.name for path in train_root.iterdir() if path.is_dir())
 
 

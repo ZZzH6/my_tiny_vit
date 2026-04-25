@@ -674,17 +674,6 @@ def render_probability_bars(items: list[dict[str, float]]) -> None:
         )
 
 
-def render_label_mapping_status(result: dict[str, object]) -> None:
-    meta = get_model_meta(result["model_key"])
-    class_names: list[str] = meta["class_names"]
-    top1 = result["top_items"][0]
-    loaded_text = f"yes ({len(class_names)} classes)" if class_names else "no (0 classes)"
-    sample_text = ", ".join(class_names[:5]) if class_names else "N/A"
-    st.caption(f"class_names loaded: {loaded_text}")
-    st.caption(f"first 5 class_names: {sample_text}")
-    st.caption(f"top1 idx -> label: {top1['index']} -> {top1['label']}")
-
-
 def render_result(result: dict[str, object], color: str) -> None:
     top1 = result["top_items"][0]
     st.markdown(
@@ -809,8 +798,6 @@ def render_live_inference(primary_key: str, compare_key: str | None, device: str
                     continue
                 results.append(result)
                 render_result(result, spec.color)
-                with st.expander("标签映射状态", expanded=False):
-                    render_label_mapping_status(result)
 
         if len(results) == 2:
             primary = results[0]
