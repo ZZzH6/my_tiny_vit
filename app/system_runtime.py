@@ -88,6 +88,37 @@ MODEL_SPECS: dict[str, ModelSpec] = {
     ),
 }
 
+SUMMARY_STATIC_FALLBACKS: dict[str, dict[str, float | int]] = {
+    "baseline_224": {
+        "img_size": 224,
+        "best_val_acc": 77.37,
+        "eval_top5": 92.59,
+        "params_m": 5.56,
+        "flops_g": 2.149395456,
+    },
+    "baseline_112": {
+        "img_size": 112,
+        "best_val_acc": 79.46,
+        "eval_top5": 93.81,
+        "params_m": 5.45,
+        "flops_g": 2.106043392,
+    },
+    "teacher_final": {
+        "img_size": 112,
+        "best_val_acc": 80.18,
+        "eval_top5": 94.07,
+        "params_m": 5.50,
+        "flops_g": 2.124106752,
+    },
+    "student_final": {
+        "img_size": 112,
+        "best_val_acc": 79.41,
+        "eval_top5": 93.28,
+        "params_m": 4.60,
+        "flops_g": 1.766381568,
+    },
+}
+
 
 class CheckpointLoadError(RuntimeError):
     """Raised when a deployment checkpoint cannot be safely loaded."""
@@ -109,6 +140,13 @@ def parse_summary_markdown(path: Path) -> dict[str, str]:
 def read_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
+
+
+def merge_summary_fallbacks(model_key: str, summary: dict[str, str]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    merged.update(SUMMARY_STATIC_FALLBACKS.get(model_key, {}))
+    merged.update(summary)
+    return merged
 
 
 def resolve_dataset_root(summary: dict[str, str]) -> Path:
@@ -322,7 +360,7 @@ def load_checkpoint_file(path: Path) -> dict[str, Any]:
 def get_model_meta(model_key: str) -> dict[str, Any]:
     spec = MODEL_SPECS[model_key]
     cfg = read_yaml(spec.config_path)
-    summary = parse_summary_markdown(spec.summary_path)
+    summary = merge_summary_fallbacks(model_key, parse_summary_markdown(spec.summary_path))
     dataset_root = resolve_dataset_root(summary)
     meta = {
         "spec": spec,

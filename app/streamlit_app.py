@@ -189,6 +189,11 @@ def inject_theme() -> None:
             color: var(--text);
         }
 
+        #MainMenu,
+        [data-testid="stToolbar"] {
+            display: none !important;
+        }
+
         [data-testid="stMetricValue"] {
             color: var(--text);
         }
@@ -1041,7 +1046,7 @@ def main() -> None:
     inject_theme()
 
     st.sidebar.markdown("## System Control")
-    device_candidates = ["cuda", "cpu"] if torch.cuda.is_available() else ["cpu"]
+    has_cuda = torch.cuda.is_available()
 
     model_titles = {spec.title: key for key, spec in MODEL_SPECS.items()}
     primary_title = st.sidebar.selectbox(
@@ -1062,7 +1067,12 @@ def main() -> None:
             )
             compare_key = model_titles[secondary_title]
 
-    device = st.sidebar.selectbox("Inference device", device_candidates, index=0)
+    if has_cuda:
+        device = st.sidebar.selectbox("Inference device", ["cuda", "cpu"], index=0)
+    else:
+        device = "cpu"
+        st.sidebar.text_input("Inference device", value=device, disabled=True)
+        st.sidebar.caption("当前部署环境未检测到 CUDA。Streamlit Cloud 默认仅支持 CPU 推理。")
     topk = st.sidebar.slider("Top-K outputs", min_value=3, max_value=5, value=5)
     st.sidebar.caption("建议部署对象：Student D10 Final")
 
