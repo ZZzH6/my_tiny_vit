@@ -393,8 +393,7 @@ def _sync_if_cuda(device: torch.device) -> None:
 
 
 def format_label(wnid: str, label_display: dict[str, str]) -> str:
-    human = label_display.get(wnid, wnid)
-    return f"{human} ({wnid})" if human != wnid else wnid
+    return label_display.get(wnid, wnid)
 
 
 def resolve_class_name(index: int, class_names: list[str]) -> str | None:
