@@ -1,0 +1,5 @@
+Teacher Stage,Input,Top-1 (%),Params (M),FLOPs (G),Delta vs overlap
+Overlap patch12,112,79.73,5.50,2.12,+0.00
+Teacher (strong),112,79.77,5.50,2.12,+0.04
+Teacher + polish40,112,80.11,5.50,2.12,+0.38
+Teacher (final),112,80.18,5.50,2.12,+0.45

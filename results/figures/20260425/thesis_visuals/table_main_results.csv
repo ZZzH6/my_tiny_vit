@@ -1,0 +1,5 @@
+Setting,Input,Top-1 (%),Params (M),FLOPs (G),Remark
+224 baseline,224,77.37,5.56,2.15,timm deit_tiny_patch16_224
+112 baseline,112,79.46,5.45,2.11,"patch8, 150 epochs"
+Teacher (final),112,80.18,5.50,2.12,two-stage refinement
+Student d10 final,112,79.41,4.60,1.77,hard-KD + two-stage refinement

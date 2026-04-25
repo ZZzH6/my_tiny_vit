@@ -1,0 +1,6 @@
+Model,Input,Top-1 (%),Params (M),FLOPs (G),Delta vs 112 base
+112 baseline,112,79.46,5.45,2.11,+0.00
+PrePatch,112,79.39,5.45,2.13,-0.07
+PreCNN,112,79.28,5.49,2.12,-0.18
+Local-FFN,112,79.25,5.48,2.12,-0.21
+Overlap patch12,112,79.73,5.50,2.12,+0.27
