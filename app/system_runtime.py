@@ -23,6 +23,7 @@ from data.build_loader import IMAGENET_MEAN, IMAGENET_STD
 from models import build_model_from_cfg
 
 MIN_CHECKPOINT_BYTES = 1024
+DEFAULT_DATASET_ROOT = ROOT / "dataset/tiny-imagenet-200"
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,28 @@ def read_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(handle)
 
 
+def resolve_dataset_root(summary: dict[str, str]) -> Path:
+    raw_root = str(summary.get("dataset_root", "")).strip()
+    candidates: list[Path] = []
+    if raw_root:
+        summary_root = Path(raw_root)
+        candidates.append(summary_root)
+        if not summary_root.is_absolute():
+            candidates.append(ROOT / summary_root)
+    candidates.append(DEFAULT_DATASET_ROOT)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return DEFAULT_DATASET_ROOT
+
+
+def load_wnids(dataset_root: Path) -> list[str]:
+    wnids_path = dataset_root / "wnids.txt"
+    if not wnids_path.exists():
+        return []
+    return [line.strip() for line in wnids_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
 def load_words_map(dataset_root: Path) -> dict[str, str]:
     words_path = dataset_root / "words.txt"
     mapping: dict[str, str] = {}
@@ -116,14 +139,28 @@ def load_words_map(dataset_root: Path) -> dict[str, str]:
     with words_path.open("r", encoding="utf-8") as handle:
         for line in handle:
             line = line.strip()
-            if not line or "\t" not in line:
+            if not line:
                 continue
-            wnid, label = line.split("\t", 1)
-            mapping[wnid] = label.split(",")[0].strip()
+            if "\t" in line:
+                wnid, label_text = line.split("\t", 1)
+            else:
+                parts = line.split(maxsplit=1)
+                if len(parts) != 2:
+                    continue
+                wnid, label_text = parts
+            wnid = wnid.strip()
+            label_text = label_text.strip()
+            if not wnid or not label_text:
+                continue
+            primary_label = label_text.split(",")[0].strip() or label_text
+            mapping.setdefault(wnid, primary_label)
     return mapping
 
 
 def get_class_names(dataset_root: Path) -> list[str]:
+    wnids = load_wnids(dataset_root)
+    if wnids:
+        return wnids
     train_root = dataset_root / "train"
     if not train_root.exists():
         return []
@@ -268,7 +305,7 @@ def get_model_meta(model_key: str) -> dict[str, Any]:
     spec = MODEL_SPECS[model_key]
     cfg = read_yaml(spec.config_path)
     summary = parse_summary_markdown(spec.summary_path)
-    dataset_root = Path(summary.get("dataset_root", ROOT / "dataset/tiny-imagenet-200"))
+    dataset_root = resolve_dataset_root(summary)
     meta = {
         "spec": spec,
         "cfg": cfg,
@@ -304,6 +341,19 @@ def format_label(wnid: str, label_display: dict[str, str]) -> str:
     return f"{human} ({wnid})" if human != wnid else wnid
 
 
+def resolve_class_name(index: int, class_names: list[str]) -> str | None:
+    if 0 <= index < len(class_names):
+        return class_names[index]
+    return None
+
+
+def format_prediction_label(index: int, class_names: list[str], label_display: dict[str, str]) -> tuple[str, str]:
+    wnid = resolve_class_name(index, class_names)
+    if wnid is None:
+        return str(index), str(index)
+    return wnid, format_label(wnid, label_display)
+
+
 def predict_image(
     model_key: str,
     image: Image.Image,
@@ -333,12 +383,12 @@ def predict_image(
 
     top_items = []
     for index, score in zip(indices[0].tolist(), scores[0].tolist()):
-        wnid = class_names[index] if index < len(class_names) else str(index)
+        wnid, label = format_prediction_label(int(index), class_names, label_display)
         top_items.append(
             {
                 "index": int(index),
                 "wnid": wnid,
-                "label": format_label(wnid, label_display),
+                "label": label,
                 "prob": float(score),
             }
         )
