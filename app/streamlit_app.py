@@ -3,6 +3,9 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
+from textwrap import dedent
+
+from html import escape
 
 import matplotlib.pyplot as plt
 import streamlit as st
@@ -97,6 +100,11 @@ def compute_teacher_gap(student_top1: float | None, teacher_top1: float | None) 
     if student_top1 is None or teacher_top1 is None:
         return None
     return teacher_top1 - student_top1
+
+
+def normalize_html_fragment(fragment: str) -> str:
+    lines = dedent(fragment).splitlines()
+    return "\n".join(line.strip() for line in lines if line.strip())
 
 
 def inject_theme() -> None:
@@ -434,22 +442,189 @@ def inject_theme() -> None:
             line-height: 1.55;
         }
 
-        .prob-card {
-            border-radius: 16px;
+        .result-shell {
+            display: flex;
+            flex-direction: column;
+            gap: 0.85rem;
+            border-radius: 22px;
+            border: 1px solid rgba(20, 20, 19, 0.08);
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(250, 249, 245, 0.96));
+            padding: 1rem;
+            min-height: 100%;
+            box-shadow: var(--ring), var(--shadow);
+        }
+
+        .result-title {
+            display: flex;
+            justify-content: space-between;
+            gap: 0.9rem;
+            align-items: flex-start;
+        }
+
+        .result-name {
+            color: var(--text);
+            font-size: 1.14rem;
+            font-weight: 600;
+            line-height: 1.3;
+        }
+
+        .result-note {
+            color: var(--muted-soft);
+            font-size: 0.9rem;
+            margin-top: 0.32rem;
+            line-height: 1.6;
+        }
+
+        .result-main {
+            display: flex;
+            flex-direction: column;
+            padding: 1rem;
+            min-height: 198px;
+            border-radius: 18px;
+            background: var(--surface-soft);
             border: 1px solid var(--line);
-            background: var(--surface);
-            padding: 0.8rem 0.85rem 0.7rem 0.85rem;
-            margin-bottom: 0.68rem;
-            box-shadow: var(--ring);
+        }
+
+        .result-main-body {
+            display: flex;
+            flex-direction: column;
+            gap: 0.9rem;
+            flex: 1;
+        }
+
+        .result-main-primary {
+            min-width: 0;
+            flex: 1;
+        }
+
+        .result-main-label {
+            color: var(--muted-soft);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 0.42rem;
+        }
+
+        .result-main-class {
+            color: var(--text);
+            font-size: 1.42rem;
+            font-weight: 600;
+            line-height: 1.18;
+            letter-spacing: -0.02em;
+            min-height: 5rem;
+            overflow: hidden;
+            overflow-wrap: break-word;
+            word-break: normal;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+        }
+
+        .result-main-side {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.5rem;
+            min-width: 0;
+            width: 100%;
+        }
+
+        .result-focus-stat {
+            padding: 0.6rem 0.68rem;
+            border-radius: 12px;
+            background: rgba(201, 100, 66, 0.08);
+            border: 1px solid rgba(201, 100, 66, 0.14);
+        }
+
+        .result-focus-stat.alt {
+            background: rgba(20, 20, 19, 0.035);
+            border-color: rgba(20, 20, 19, 0.06);
+        }
+
+        .result-focus-stat .label {
+            color: var(--muted-soft);
+            font-size: 0.68rem;
+            margin-bottom: 0.18rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+
+        .result-focus-stat .value {
+            color: var(--text);
+            font-size: 0.95rem;
+            font-weight: 600;
+            line-height: 1.18;
+        }
+
+        .result-metric-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.48rem;
+        }
+
+        .result-metric {
+            border-radius: 12px;
+            background: rgba(20, 20, 19, 0.03);
+            padding: 0.56rem 0.62rem;
+            border: 1px solid var(--line);
+        }
+
+        .result-metric .label {
+            color: var(--muted-soft);
+            font-size: 0.68rem;
+            margin-bottom: 0.18rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+
+        .result-metric .value {
+            color: var(--text);
+            font-size: 0.9rem;
+            font-weight: 600;
+            line-height: 1.2;
+        }
+
+        .result-detail-note {
+            color: var(--muted-soft);
+            font-size: 0.84rem;
+            line-height: 1.5;
+        }
+
+        .prob-list {
+            display: grid;
+            gap: 0.55rem;
+        }
+
+        .prob-card {
+            border-radius: 14px;
+            border: 1px solid rgba(20, 20, 19, 0.06);
+            background: rgba(255, 255, 255, 0.54);
+            padding: 0.78rem 0.82rem 0.74rem 0.82rem;
         }
 
         .prob-head {
             display: flex;
             justify-content: space-between;
-            gap: 1rem;
+            align-items: flex-start;
+            gap: 0.9rem;
             color: var(--text);
-            font-size: 0.94rem;
-            margin-bottom: 0.45rem;
+            font-size: 0.92rem;
+            margin-bottom: 0.42rem;
+        }
+
+        .prob-label {
+            flex: 1;
+            min-width: 0;
+            line-height: 1.45;
+            overflow: hidden;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .prob-value {
+            flex-shrink: 0;
+            color: var(--muted);
+            font-weight: 600;
         }
 
         .prob-track {
@@ -466,90 +641,96 @@ def inject_theme() -> None:
             background: linear-gradient(90deg, var(--accent-deep), var(--accent));
         }
 
-        .result-shell {
-            border-radius: 18px;
+        @media (max-width: 1180px) {
+            .result-main-side {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+
+        @media (max-width: 760px) {
+            .result-main-side,
+            .result-metric-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+
+        .compare-summary-shell {
+            margin-top: 1.9rem;
+            padding: 1.05rem 1.1rem 1.1rem 1.1rem;
+            border-radius: 20px;
             border: 1px solid var(--line);
-            background: var(--surface);
-            padding: 1rem;
-            height: 100%;
-            box-shadow: var(--ring), var(--shadow);
+            background: rgba(255, 255, 255, 0.52);
+            box-shadow: var(--ring);
         }
 
-        .result-title {
-            display: flex;
-            justify-content: space-between;
-            gap: 0.8rem;
-            align-items: center;
-            margin-bottom: 0.7rem;
-        }
-
-        .result-name {
+        .compare-summary-title {
             color: var(--text);
-            font-size: 1.1rem;
+            font-size: 1rem;
             font-weight: 600;
+            margin-bottom: 0.25rem;
         }
 
-        .result-note {
-            color: var(--muted-soft);
-            font-size: 0.9rem;
-            margin-top: 0.25rem;
-            line-height: 1.55;
+        .compare-summary-copy {
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.6;
         }
 
-        .result-grid {
+        .compare-summary-grid {
             display: grid;
             grid-template-columns: repeat(3, minmax(0, 1fr));
-            gap: 0.7rem;
-            margin: 0.85rem 0 1rem 0;
+            gap: 0.75rem;
+            margin-top: 0.9rem;
         }
 
-        .mini-stat {
+        .compare-summary-card {
+            padding: 0.82rem 0.82rem 0.78rem 0.82rem;
             border-radius: 14px;
             background: var(--surface-soft);
-            padding: 0.78rem 0.75rem;
             border: 1px solid var(--line);
         }
 
-        .mini-stat .label {
+        .compare-summary-card .label {
             color: var(--muted-soft);
-            font-size: 0.76rem;
-            margin-bottom: 0.3rem;
+            font-size: 0.74rem;
+            margin-bottom: 0.28rem;
             text-transform: uppercase;
             letter-spacing: 0.06em;
         }
 
-        .mini-stat .value {
+        .compare-summary-card .value {
             color: var(--text);
-            font-size: 1.1rem;
+            font-size: 1.04rem;
             font-weight: 600;
+            line-height: 1.3;
         }
 
         .architecture {
             display: grid;
             grid-template-columns: repeat(5, minmax(0, 1fr));
-            gap: 0.75rem;
-            margin-top: 0.4rem;
+            gap: 0.9rem;
+            margin-top: 0.75rem;
         }
 
         .arch-node {
             position: relative;
-            padding: 0.95rem 0.85rem;
-            min-height: 130px;
-            border-radius: 16px;
-            background: var(--surface);
-            border: 1px solid var(--line);
-            box-shadow: var(--ring);
+            padding: 1.1rem 0.95rem 1rem 0.95rem;
+            min-height: 148px;
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(250, 249, 245, 0.92));
+            border: 1px solid rgba(20, 20, 19, 0.06);
+            box-shadow: 0 10px 28px rgba(20, 20, 19, 0.04);
         }
 
         .arch-node::after {
             content: "→";
             position: absolute;
-            right: -0.58rem;
+            right: -0.72rem;
             top: 50%;
             transform: translateY(-50%);
-            color: var(--accent);
-            font-size: 1.15rem;
-            font-weight: 800;
+            color: rgba(94, 93, 89, 0.7);
+            font-size: 1rem;
+            font-weight: 700;
         }
 
         .architecture .arch-node:last-child::after {
@@ -576,6 +757,89 @@ def inject_theme() -> None:
             color: var(--muted);
             font-size: 0.88rem;
             line-height: 1.55;
+        }
+
+        .arch-detail-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+            gap: 1rem;
+            align-items: stretch;
+            margin: 2.85rem 0 1.65rem 0;
+        }
+
+        .arch-detail-card {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+            padding: 1.3rem 1.25rem 1.2rem 1.25rem;
+            border-radius: 24px;
+            background: rgba(255, 255, 255, 0.42);
+            border: 1px solid rgba(20, 20, 19, 0.04);
+        }
+
+        .arch-detail-eyebrow {
+            color: var(--muted-soft);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 0.75rem;
+        }
+
+        .arch-detail-heading {
+            color: var(--text);
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin: 0 0 0.45rem 0;
+        }
+
+        .arch-detail-copy {
+            color: var(--muted);
+            font-size: 0.95rem;
+            line-height: 1.72;
+            margin: 0;
+        }
+
+        .arch-detail-points {
+            display: grid;
+            gap: 0.58rem;
+            margin: 1rem 0 1.15rem 0;
+        }
+
+        .arch-detail-point {
+            padding: 0.72rem 0.8rem;
+            border-radius: 14px;
+            background: rgba(20, 20, 19, 0.035);
+            color: var(--muted);
+            font-size: 0.9rem;
+            line-height: 1.55;
+        }
+
+        .arch-code-shell {
+            margin-top: auto;
+            padding: 0.88rem 0.95rem 0.95rem 0.95rem;
+            border-radius: 18px;
+            background: linear-gradient(180deg, #f7f4ed 0%, #f2eee5 100%);
+            border: 1px solid rgba(20, 20, 19, 0.07);
+            box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+        }
+
+        .arch-code-caption {
+            color: var(--muted-soft);
+            font-size: 0.73rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin-bottom: 0.62rem;
+        }
+
+        .arch-code-shell pre {
+            margin: 0;
+            white-space: pre-wrap;
+            color: #1f1f1d;
+            font-size: 0.85rem;
+            line-height: 1.7;
+            font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
         }
 
         .conclusion {
@@ -607,8 +871,9 @@ def inject_theme() -> None:
         }
 
         @media (max-width: 1100px) {
-            .result-grid,
-            .architecture {
+            .compare-summary-grid,
+            .architecture,
+            .arch-detail-grid {
                 grid-template-columns: 1fr;
             }
 
@@ -660,50 +925,111 @@ def panel(title: str, body: str) -> None:
     )
 
 
-def render_probability_bars(items: list[dict[str, float]]) -> None:
+def build_probability_bars_html(items: list[dict[str, object]]) -> str:
+    cards: list[str] = []
     for item in items:
-        percent = item["prob"] * 100.0
-        st.markdown(
-            f"""
+        percent = float(item["prob"]) * 100.0
+        label = escape(str(item["label"]))
+        cards.append(
+            normalize_html_fragment(
+                f"""
             <div class="prob-card">
                 <div class="prob-head">
-                    <span>{item['label']}</span>
-                    <span>{percent:.2f}%</span>
+                    <span class="prob-label">{label}</span>
+                    <span class="prob-value">{percent:.2f}%</span>
                 </div>
                 <div class="prob-track">
                     <div class="prob-fill" style="width: {percent:.2f}%"></div>
                 </div>
             </div>
-            """,
-            unsafe_allow_html=True,
+                """
+            )
         )
-
-
-def render_result(result: dict[str, object], color: str) -> None:
-    top1 = result["top_items"][0]
-    st.markdown(
+    return normalize_html_fragment(
         f"""
-        <div class="result-shell">
+        <div class="prob-list">
+            {"".join(cards)}
+        </div>
+        """
+    )
+
+
+def build_result_card_html(result: dict[str, object], color: str) -> str:
+    top1 = result["top_items"][0]
+    return normalize_html_fragment(
+        f"""
+        <article class="result-shell">
             <div class="result-title">
                 <div>
-                    <div class="small-chip" style="margin-bottom: 0.25rem; color:{color}; border-color:{color}55; background:{color}12;">{result['badge']}</div>
-                    <div class="result-name">{result['title']}</div>
-                    <div class="result-note">{result['note']}</div>
+                    <div class="small-chip" style="margin-bottom: 0.28rem; color:{color}; border-color:{color}55; background:{color}12;">{escape(str(result['badge']))}</div>
+                    <div class="result-name">{escape(str(result['title']))}</div>
+                    <div class="result-note">{escape(str(result['note']))}</div>
                 </div>
             </div>
-            <div class="result-grid">
-                <div class="mini-stat"><div class="label">Top-1</div><div class="value">{top1['label']}</div></div>
-                <div class="mini-stat"><div class="label">Confidence</div><div class="value">{top1['prob'] * 100.0:.2f}%</div></div>
-                <div class="mini-stat"><div class="label">Latency</div><div class="value">{result['elapsed_ms']:.2f} ms</div></div>
-                <div class="mini-stat"><div class="label">Val Top-1</div><div class="value">{result['best_val_acc']:.2f}%</div></div>
-                <div class="mini-stat"><div class="label">Params</div><div class="value">{result['params_m']:.2f} M</div></div>
-                <div class="mini-stat"><div class="label">FLOPs</div><div class="value">{result['flops_g']:.2f} G</div></div>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+            <section class="result-main">
+                <div class="result-main-body">
+                    <div class="result-main-primary">
+                        <div class="result-main-label">Top-1 Prediction</div>
+                        <div class="result-main-class">{escape(str(top1['label']))}</div>
+                    </div>
+                    <div class="result-main-side">
+                        <div class="result-focus-stat">
+                            <div class="label">Confidence</div>
+                            <div class="value">{float(top1['prob']) * 100.0:.2f}%</div>
+                        </div>
+                        <div class="result-focus-stat alt">
+                            <div class="label">Latency</div>
+                            <div class="value">{float(result['elapsed_ms']):.2f} ms</div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            <section class="result-metric-grid">
+                <div class="result-metric"><div class="label">Val Top-1</div><div class="value">{float(result['best_val_acc']):.2f}%</div></div>
+                <div class="result-metric"><div class="label">Params</div><div class="value">{float(result['params_m']):.2f} M</div></div>
+                <div class="result-metric"><div class="label">FLOPs</div><div class="value">{float(result['flops_g']):.2f} G</div></div>
+            </section>
+        </article>
+        """
     )
-    render_probability_bars(result["top_items"])
+
+
+def render_result_panel(result: dict[str, object], color: str) -> None:
+    st.markdown(build_result_card_html(result, color), unsafe_allow_html=True)
+    detail_items = list(result["top_items"][1:])
+    detail_count = len(detail_items)
+    with st.expander(f"查看 {escape(str(result['title']))} 的 Top-K 详细概率", expanded=False):
+        if detail_items:
+            st.markdown(
+                f'<div class="result-detail-note">Top-1 已常驻展示，这里仅展开其余 {detail_count} 个候选类别。</div>',
+                unsafe_allow_html=True,
+            )
+            st.markdown(build_probability_bars_html(detail_items), unsafe_allow_html=True)
+        else:
+            st.markdown(
+                '<div class="result-detail-note">当前返回结果只包含 Top-1，暂无更多候选类别可展开。</div>',
+                unsafe_allow_html=True,
+            )
+
+
+def build_compare_summary_html(primary: dict[str, object], secondary: dict[str, object]) -> str:
+    same_top1 = primary["top_items"][0]["wnid"] == secondary["top_items"][0]["wnid"]
+    verdict = "一致" if same_top1 else "不同"
+    latency_delta = float(primary["elapsed_ms"]) - float(secondary["elapsed_ms"])
+    flops_delta = float(primary["flops_g"]) - float(secondary["flops_g"])
+    return normalize_html_fragment(
+        f"""
+        <section class="compare-summary-shell">
+            <div class="compare-summary-title">对比摘要</div>
+            <div class="compare-summary-copy">同一输入图片下，对比主模型与参考模型的预测一致性、推理时延与复杂度差异。</div>
+            <div class="compare-summary-grid">
+                <div class="compare-summary-card"><div class="label">Top-1 一致性</div><div class="value">{verdict}</div></div>
+                <div class="compare-summary-card"><div class="label">延迟差</div><div class="value">{latency_delta:+.2f} ms</div></div>
+                <div class="compare-summary-card"><div class="label">复杂度差</div><div class="value">{flops_delta:+.2f} G</div></div>
+            </div>
+        </section>
+        """
+    )
 
 
 def build_accuracy_flops_figure() -> plt.Figure:
@@ -771,7 +1097,7 @@ def load_display_image(uploaded_file) -> Image.Image:
 
 def render_live_inference(primary_key: str, compare_key: str | None, device: str, topk: int) -> None:
     st.markdown("### 实时推理工作台")
-    left, right = st.columns([0.88, 1.12], gap="large")
+    left, right = st.columns([0.95, 1.05], gap="large")
 
     with left:
         upload = st.file_uploader(
@@ -790,39 +1116,25 @@ def render_live_inference(primary_key: str, compare_key: str | None, device: str
     with right:
         keys = [primary_key] + ([compare_key] if compare_key else [])
         keys = [key for key in keys if key]
-        result_cols = st.columns(len(keys), gap="large")
-        results = []
-        for idx, model_key in enumerate(keys):
+        results: list[tuple[object, dict[str, object]]] = []
+        for model_key in keys:
             spec = MODEL_SPECS[model_key]
-            with result_cols[idx]:
-                try:
-                    with st.spinner(f"加载 {spec.title} 并执行推理..."):
-                        result = predict_image(model_key, image=image, device=device, topk=topk)
-                except CheckpointLoadError as exc:
-                    st.error(f"{spec.title} 加载失败\n\n{exc}")
-                    continue
-                results.append(result)
-                render_result(result, spec.color)
+            try:
+                with st.spinner(f"加载 {spec.title} 并执行推理..."):
+                    result = predict_image(model_key, image=image, device=device, topk=topk)
+            except CheckpointLoadError as exc:
+                st.error(f"{spec.title} 加载失败\n\n{exc}")
+                continue
+            results.append((spec, result))
+
+        if results:
+            result_cols = st.columns(len(results), gap="medium")
+            for col, (spec, result) in zip(result_cols, results):
+                with col:
+                    render_result_panel(result, spec.color)
 
         if len(results) == 2:
-            primary = results[0]
-            secondary = results[1]
-            same_top1 = primary["top_items"][0]["wnid"] == secondary["top_items"][0]["wnid"]
-            verdict = "一致" if same_top1 else "不同"
-            st.markdown("#### 对比摘要")
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.metric("Top-1 一致性", verdict)
-            with c2:
-                st.metric(
-                    "延迟差",
-                    f"{primary['elapsed_ms'] - secondary['elapsed_ms']:+.2f} ms",
-                )
-            with c3:
-                st.metric(
-                    "复杂度差",
-                    f"{primary['flops_g'] - secondary['flops_g']:+.2f} G",
-                )
+            st.markdown(build_compare_summary_html(results[0][1], results[1][1]), unsafe_allow_html=True)
 
 
 def render_batch_inference(device: str, topk: int) -> None:
@@ -941,64 +1253,82 @@ def render_experiment_dashboard() -> None:
 
 
 def render_architecture() -> None:
+    structure_block = (
+        "app/\n"
+        "  streamlit_app.py      # 页面入口\n"
+        "  system_runtime.py     # 模型加载、推理、结果整理\n"
+        "configs/                # 模型配置\n"
+        "models/                 # 模型定义\n"
+        "results/                # checkpoint、summary、figures"
+    )
+    launch_command = "streamlit run app/streamlit_app.py"
+
     st.markdown("### 系统设计与实现")
     st.markdown(
-        """
+        f"""
+        <div class="small-chip">System Flow · Deployment-aligned inference path</div>
         <div class="architecture">
-            <div class="arch-node">
+            <section class="arch-node">
                 <div class="arch-step">Step 1</div>
                 <div class="arch-title">Image Input</div>
                 <div class="arch-copy">支持单图上传、批量上传和默认示例图，作为系统输入层。</div>
-            </div>
-            <div class="arch-node">
+            </section>
+            <section class="arch-node">
                 <div class="arch-step">Step 2</div>
                 <div class="arch-title">Preprocess</div>
                 <div class="arch-copy">按模型配置复现验证集预处理，保持 resize、插值和归一化与实验一致。</div>
-            </div>
-            <div class="arch-node">
+            </section>
+            <section class="arch-node">
                 <div class="arch-step">Step 3</div>
                 <div class="arch-title">Model Router</div>
                 <div class="arch-copy">根据用户选择调度 baseline、teacher 或 final student，并缓存权重。</div>
-            </div>
-            <div class="arch-node">
+            </section>
+            <section class="arch-node">
                 <div class="arch-step">Step 4</div>
                 <div class="arch-title">Inference Engine</div>
                 <div class="arch-copy">执行 PyTorch 前向推理，输出 logits、Top-k 概率和单次时延。</div>
-            </div>
-            <div class="arch-node">
+            </section>
+            <section class="arch-node">
                 <div class="arch-step">Step 5</div>
                 <div class="arch-title">Result Board</div>
                 <div class="arch-copy">展示类别、置信度、模型复杂度、实验结论和批量推理结果下载。</div>
-            </div>
+            </section>
+        </div>
+        <div class="arch-detail-grid">
+            <section class="arch-detail-card">
+                <div class="arch-detail-eyebrow">Architecture Notes</div>
+                <h4 class="arch-detail-heading">模块划分</h4>
+                <p class="arch-detail-copy">
+                    表现层由 Streamlit 构成；业务层负责预处理、模型调度、Top-k 后处理与结果组织；
+                    模型层复用现有 <code>models/</code>、<code>configs/</code> 和训练得到的 checkpoint；
+                    数据层使用 Tiny-ImageNet 类别映射、实验摘要和结果可视化文件。
+                </p>
+                <div class="arch-code-shell">
+                    <div class="arch-code-caption">Project Structure</div>
+                    <pre><code>{escape(structure_block)}</code></pre>
+                </div>
+            </section>
+            <section class="arch-detail-card">
+                <div class="arch-detail-eyebrow">Implementation Notes</div>
+                <h4 class="arch-detail-heading">实现重点</h4>
+                <p class="arch-detail-copy">
+                    系统不重新实现训练主流程，而是直接复用主实验配置、权重与预处理协议，
+                    让系统演示结果与论文实验结果保持同一套输入规范与评价口径。
+                </p>
+                <div class="arch-detail-points">
+                    <div class="arch-detail-point">复用主实验配置，避免系统页面和训练脚本出现双份逻辑。</div>
+                    <div class="arch-detail-point">推理结果、复杂度指标和实验看板统一指向论文主线资产。</div>
+                    <div class="arch-detail-point">部署侧仅负责调度、展示与导出，不改变模型本身定义。</div>
+                </div>
+                <div class="arch-code-shell">
+                    <div class="arch-code-caption">Launch Command</div>
+                    <pre><code>{escape(launch_command)}</code></pre>
+                </div>
+            </section>
         </div>
         """,
         unsafe_allow_html=True,
     )
-
-    left, right = st.columns([1.05, 0.95], gap="large")
-    with left:
-        panel(
-            "模块划分",
-            "表现层由 Streamlit 构成；业务层负责预处理、模型调度、Top-k 后处理与结果组织；"
-            "模型层复用现有 `models/`、`configs/` 和训练得到的 checkpoint；"
-            "数据层使用 Tiny-ImageNet 类别映射、实验摘要和结果可视化文件。",
-        )
-        st.code(
-            "app/\n"
-            "  streamlit_app.py      # 页面入口\n"
-            "  system_runtime.py     # 模型加载、推理、结果整理\n"
-            "configs/                # 模型配置\n"
-            "models/                 # 模型定义\n"
-            "results/                # checkpoint、summary、figures",
-            language="text",
-        )
-    with right:
-        panel(
-            "实现重点",
-            "本系统没有重新实现训练逻辑，而是直接复用主实验配置、权重与预处理协议。"
-            "这样可以保证系统演示结果与论文实验结果严格对齐，避免出现“实验一套、页面一套”的偏差。",
-        )
-        st.code("streamlit run app/streamlit_app.py", language="bash")
 
     st.markdown("#### 系统功能清单")
     feature_cols = st.columns(4)
